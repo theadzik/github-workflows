@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # The actions pinned inside the reusable workflows here are what every caller
+  # repository ends up running, so they are updated in this repository and reach
+  # callers through a new release tag.
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 2
+    groups:
+      github-actions:
+        patterns:
+          - "*"
