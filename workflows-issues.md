@@ -1,0 +1,114 @@
+# Open issues before the next release
+
+Tracking list for `build-and-push.yaml`. The workflow on `main` is the OCI-layout
+flow (build → scan on disk → push by digest → sign → attest → verify → tag), but it
+is unreleased: `v2.0.0` and `v2` were deleted so nothing can pin a half-finished
+version. `v1` still points at v1.1.0 and is what the open caller PRs use.
+
+Ordered by what could break a build, not by severity of consequence.
+
+## 1. `trivy-action`'s `input:` has only been proven on the CLI
+
+**Status:** in progress.
+
+The scan step passes `input: ${{ runner.temp }}/layout` — a *directory* holding an OCI
+layout, not the tar file the parameter is usually given.
+
+What was actually verified: `trivy image --input layout` on the command line, against a
+layout containing an image manifest plus a buildkit attestation manifest. Trivy read it,
+picked the image manifest rather than the attestation, and reported the two fixable HIGH
+findings in `alpine:3.19`.
+
+What was not verified: that `aquasecurity/trivy-action` passes the parameter through to
+the same `--input` flag, that it accepts a directory where it may expect a file, and that
+it does not require `image-ref` alongside it. If any of that is wrong, every build fails
+at the scan step — which is why this is first.
+
+**How to settle it:** read the action at the pinned SHA and replay its entrypoint locally
+with the same environment it would set in CI. A live run in a throwaway branch would be
+conclusive, but needs a push.
+
+## 2. The push path has never executed
+
+**Status:** open. Blocked on credentials or a merge.
+
+Everything from `Push layout by digest` onward — the regctl push, `cosign sign`, both
+attestations, `cosign verify`, `Publish tags` — has never run in CI. Pull requests call
+the workflow with `push: false`, so they exercise the build and scan only, and this
+machine has no registry credentials.
+
+The individual links were rehearsed locally against a scratch registry: regctl pushed a
+layout at its digest with no tag written, cosign signed that digest and verified it, and
+`imagetools create` retagged it without changing the digest. What has not been exercised
+is the sequence running as one job with real credentials, keyless OIDC and Docker Hub
+rather than `localhost:5055`.
+
+**How to settle it:** after the caller PRs merge, `gh workflow run manual-build.yaml` in
+the blog repo with `push: true` against a throwaway tag, then inspect the referrers on the
+resulting digest.
+
+## 3. cosign 3.x signature format versus Kyverno 1.18.2
+
+**Status:** open. Depends on 2.
+
+cosign is pinned to `v3.0.6`. Version 3 has no `--new-bundle-format` flag: it writes a
+Sigstore bundle to a `sha256-<digest>` tag, where 2.x wrote a classic simple-signing
+`sha256-<digest>.sig`. Confirmed locally — after signing, the scratch registry listed
+exactly one tag, `sha256-ec0cb064…`, with no `.sig` suffix.
+
+Whether `verifyImageSignatures` in the `ImageValidatingPolicy` accepts that shape is
+unconfirmed. Kyverno 1.18.2 is recent and sigstore-go based, and it already verifies the
+bundle-format attestations `actions/attest` produces, so it very likely does. "Very
+likely" is not a basis for a policy that gates admission.
+
+If it turns out to want the classic layout, the fix is one line: pin a 2.x release in the
+installer's `cosign-release` input.
+
+## 4. Kyverno is not verifying anything today
+
+**Status:** open. Independent of this repository.
+
+Every pod running a `theadzik/*` image reports `error`, not `pass`, in its PolicyReport:
+
+```text
+zmuda-pro-blog:2026.7.5   error   429 Too Many Requests   index.docker.io/v2/theadzik/zmuda-pro-blog/manifests/…
+vw-restore:2026.7.1       error   429 Too Many Requests
+custom-argocd:v3.4.4      error   429 Too Many Requests
+```
+
+Reports re-evaluated at 05:22 UTC on 2026-07-31, so this is current, not stale. With
+`failurePolicy: Ignore`, an evaluation error admits the pod — so no image is currently
+verified at admission, signature or attestation. Pods that show `pass` are the ones whose
+images do not match the `theadzik/*` glob, meaning there was nothing to check.
+
+`dockerhub-image-pull-secret` exists in the `kyverno` namespace and the policy references
+it under `credentials.secrets`, yet the fetches still go out rate-limited. Worth finding
+out whether the credential is reaching the verifier at all. The same rate limit hit a
+local `cosign verify` from a workstation, so it is not specific to the cluster.
+
+Once it verifies for real, `failurePolicy: Fail` is worth considering — under `Ignore`,
+any registry hiccup silently admits an unverified image, which is the opposite of what
+the policy is for.
+
+## 5. The SBOM round-trips through the registry
+
+**Status:** open. Cleanup, not a defect.
+
+`Extract buildx-generated SBOM` runs `docker buildx imagetools inspect` against the
+pushed digest to pull out the SPDX document, then feeds it to `actions/attest`. The OCI
+layout on disk already contains that same SBOM as an attestation-manifest blob, so the
+round trip is avoidable: reading it locally would remove a registry dependency from the
+attestation path and make the step work before the push rather than after.
+
+Left alone for now because the current form is inherited from v1 and known to work,
+and changing it while 1 and 2 are unresolved would confuse the diagnosis.
+
+## 6. Caller PRs still pin v1.1.0
+
+**Status:** open. Decision, not work.
+
+[homelab#331](https://github.com/theadzik/homelab/pull/331) and
+[blog#111](https://github.com/theadzik/blog/pull/111) pin v1.1.0, which pushes first and
+scans the pushed digest. They are correct and green as they stand; they simply predate
+the layout flow. Either land them and repin later, or hold them until this list is worked
+through and repin once.
