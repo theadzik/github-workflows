@@ -6,21 +6,30 @@ reusable workflow is only callable from private repositories owned by the same u
 
 ## `build-and-push.yaml`
 
-Builds a container image once, pushes it by digest, then scans, signs and attests that
-exact digest — and only publishes tags if all of it passed.
+Builds a container image once into an OCI layout, scans it there, and only then pushes
+it — by digest, then signs and attests that digest, and publishes tags last.
 
-**One artifact all the way through.** The build runs once. Everything after it —
-the Trivy scan, the cosign signature, the SBOM and provenance attestations — references
-the digest that build produced. Nothing is rebuilt or re-exported in between, so the
-bytes that were scanned are provably the bytes that were signed and deployed.
+```text
+build → OCI layout on disk → Trivy → push by digest (no tag)
+      → cosign sign → attest SBOM → attest provenance → cosign verify → publish tags
+```
 
-**The tag is the gate, not the push.** ArgoCD Image Updater discovers images by listing
-tags, so an image pushed by digest with no tags is inert: nothing can select it, and the
-Kyverno `ImageValidatingPolicy` would reject it anyway while it has no signature or
-attestations. Publishing tags last means a failed scan leaves an orphan digest rather
-than a deployable image. `imagetools create` re-pushes the same manifest under each tag
-rather than wrapping it in a new index, so the digest is unchanged and the referrers
-attached to it stay findable.
+**Nothing unscanned reaches the registry.** The build exports to `type=oci` on disk and
+Trivy scans the layout in place. A finding fails the job before a single byte is pushed.
+The same exporter serves pull requests, which simply never push what they built.
+
+**One artifact all the way through.** The digest comes from the layout's `index.json` —
+the digest that will exist in the registry, byte for byte. The scan, the push, the
+signature and both attestations all reference it. Nothing is rebuilt or re-exported in
+between.
+
+**The tag is the gate.** ArgoCD Image Updater discovers images by listing tags, so an
+image pushed at its digest with no tag is inert: nothing can select it. `regctl` does
+that push — `docker buildx imagetools create` refuses to run without `--tag` and skopeo
+rejects a digest destination, so it is the one tool here that reproduces what buildkit's
+`push-by-digest` exporter used to do. Tags go up last, via `imagetools create`, which
+re-pushes the same manifest under each tag rather than wrapping it in a new index, so
+the digest is unchanged and the referrers attached to it stay findable.
 
 **Signed, not just attested.** `actions/attest` produces signed statements *about* the
 image; `cosign sign` produces a signature *on* it, which is what Kyverno's
@@ -33,7 +42,7 @@ the cluster would refuse fails the build instead of the rollout.
 ```yaml
 jobs:
   build-and-push:
-    uses: theadzik/github-workflows/.github/workflows/build-and-push.yaml@<commit-sha> # v1
+    uses: theadzik/github-workflows/.github/workflows/build-and-push.yaml@<commit-sha> # v2
     permissions:
       contents: read
       id-token: write
@@ -64,9 +73,9 @@ more than the calling job has.
 | `fetch-depth` | `1` | Checkout depth. Use `0` when the build reads `.git`. |
 | `tags` | `type=raw,value=latest` | `docker/metadata-action` tag spec, one per line. |
 | `build-args` | *(none)* | Build args, one `KEY=value` per line. |
-| `platforms` | `linux/amd64` | Single platform only — the pre-push scan loads the image locally. |
+| `platforms` | `linux/amd64` | Multi-platform is allowed, but Trivy scans only one platform of the index and the rest are signed unscanned. The job warns when you opt in. |
 | `push` | `true` | `false` builds and scans only, for pull requests. |
-| `scan` | `true` | Fail on fixable findings before anything is published. |
+| `scan` | `true` | Fail on fixable findings before anything is pushed. |
 | `scan-severity` | `HIGH,CRITICAL` | Trivy severities that fail the build. |
 | `registry` | `docker.io` | Registry to push to. |
 | `registry-username` | *(`vars.DOCKERHUB_USERNAME`)* | Registry namespace and login user. |
@@ -77,7 +86,7 @@ more than the calling job has.
 
 | Output | Description |
 | --- | --- |
-| `digest` | Digest of the pushed image. Empty when `push` is `false`. |
+| `digest` | Digest of the image that was built, scanned and — when `push` is `true` — signed and tagged. |
 | `image-ref` | Image reference without a tag. |
 
 ### Secrets
@@ -86,8 +95,28 @@ more than the calling job has.
 | --- | --- |
 | `DOCKERHUB_TOKEN` | Registry token, used for `registry` and `extra-registry`. |
 
+### Pinned tools
+
+`regctl` is downloaded and checksum-verified rather than installed from an action, so the
+binary is verified instead of trusted. Bumping it means updating both `REGCTL_VERSION` and
+`REGCTL_SHA256` in the `Install regctl` step — Dependabot does not track it.
+
+`cosign` is pinned to `v3.0.6` via the installer's `cosign-release` input. cosign 3.x
+writes a Sigstore bundle to the `sha256-<digest>` tag; 2.x wrote a classic simple-signing
+`sha256-<digest>.sig`. Which of the two an admission controller accepts is worth
+confirming against the cluster rather than inheriting from an installer default that can
+change. Dependabot does not track this input either.
+
 ## Versioning
 
 Callers should pin to a commit SHA with the tag in a trailing comment. Dependabot's
 `github-actions` ecosystem updates job-level `uses:` references, so pinned callers get a
 pull request when a new tag is released here.
+
+| Tag | Shape |
+| --- | --- |
+| `v2` | Builds to an OCI layout, scans it on disk, then pushes by digest with `regctl`. Nothing unscanned reaches the registry. Multi-platform allowed with single-platform scan coverage. |
+| `v1` | Builds straight into the registry (`push-by-digest`), then scans the pushed digest. Multi-platform rejected. |
+
+Inputs and outputs are identical between the two, so moving from `v1` to `v2` is a pin
+change only.

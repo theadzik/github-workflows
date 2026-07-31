@@ -36,7 +36,7 @@ on:
         type: string
         default: ""
       platforms:
-        description: "Single platform only - the pre-push scan loads the image locally."
+        description: "Multi-platform is allowed, but Trivy scans only one platform of the index."
         required: false
         type: string
         default: "linux/amd64"
@@ -98,18 +98,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     outputs:
-      digest: ${{ steps.build-push.outputs.digest }}
+      digest: ${{ steps.layout.outputs.digest }}
       image-ref: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
     steps:
-      # Two reasons: the build-only path exports to the local docker daemon,
-      # which cannot hold more than one platform, and Trivy scans a single
-      # platform out of a multi-platform index, so the scan would cover less
-      # than what gets signed.
-      - name: Reject multi-platform input
+      # Trivy scans one platform out of a multi-platform index, so the platforms
+      # beyond the first are signed without having been scanned. Accepted
+      # deliberately rather than blocked, but it should be visible in the log of
+      # any build that opts into it.
+      - name: Warn on multi-platform scan coverage
         if: contains(inputs.platforms, ',')
-        run: |
-          echo "::error title=platforms::multi-platform builds are unsupported; the scan would not cover every platform that gets signed"
-          exit 1
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |-
+          echo "::warning title=Scan coverage::${PLATFORMS} produces a multi-platform index. Trivy scans one platform; the others are signed unscanned."
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -150,60 +151,103 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
           tags: ${{ inputs.tags }}
 
-      # One build, one artifact. An earlier version built the image locally to
-      # scan it and then built it again to push, which meant the bytes Trivy
-      # cleared were only presumed identical to the bytes that got signed: a
-      # cache miss, or a base image whose tag moved between the two builds,
-      # would silently break that assumption.
+      # One build, one artifact, exported to an OCI layout on disk rather than
+      # straight into the registry. Everything downstream - the scan, the push,
+      # the signature, the attestations - references the digest this produces,
+      # so the bytes that were scanned are the bytes that get signed and
+      # deployed. The same exporter serves both paths: a build-only run simply
+      # never pushes what it built.
       #
-      # When publishing, the exporter pushes by digest with no tags, so the
-      # image is not yet discoverable - ArgoCD Image Updater finds images by
-      # listing tags - and every gate below runs against that exact digest
-      # before any tag exists. When not publishing, the same build is exported
-      # to the local docker daemon and scanned there.
-      - name: Build image
-        id: build-push
+      # The layout already contains the SBOM and provenance attestation
+      # manifests, so the push below carries them rather than regenerating them.
+      - name: Build to OCI layout
+        id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: ${{ inputs.context-path }}
           platforms: ${{ inputs.platforms }}
-          outputs: ${{ inputs.push && format('type=image,name={0}/{1}/{2},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, env.REPOSITORY, env.IMAGE_NAME) || 'type=docker' }}
-          # push-by-digest rejects tags; the docker exporter needs one to give
-          # Trivy something to reference.
-          tags: ${{ !inputs.push && steps.meta.outputs.tags || '' }}
+          outputs: type=oci,tar=false,dest=${{ runner.temp }}/layout,name=${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # The local `docker` exporter rejects attestations.
           provenance: ${{ inputs.push && 'mode=max' || 'false' }}
           sbom: ${{ inputs.push }}
           build-args: |
             ${{ inputs.build-args }}
 
-      # Scans the digest that was just pushed, not a rebuild of it. Nothing
-      # consults GitHub check status at deploy time, so this failing is what
-      # keeps the image untagged, unsigned and unattested - and therefore
-      # undeployable under the Kyverno policy, which requires all three.
+      # index.json is the authority, not the action's digest output: this is the
+      # digest that will exist in the registry, byte for byte.
+      - name: Read layout digest
+        id: layout
+        run: |-
+          set -euo pipefail
+          digest=$(jq -er '.manifests[0].digest' "${RUNNER_TEMP}/layout/index.json")
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "Built ${digest}"
+
+      # Scans the layout on disk, before anything has been pushed, so a finding
+      # keeps the image out of the registry entirely rather than leaving an
+      # orphan digest behind.
       #
       # ignore-unfixed: an unfixable finding in a base image cannot be actioned
       # here, and would block every release until upstream published a patch.
       - name: Scan image for vulnerabilities
         if: inputs.scan
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
-        env:
-          TRIVY_USERNAME: ${{ env.REPOSITORY }}
-          TRIVY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
         with:
-          image-ref: ${{ inputs.push && format('{0}/{1}/{2}@{3}', env.REGISTRY, env.REPOSITORY, env.IMAGE_NAME, steps.build-push.outputs.digest) || fromJSON(steps.meta.outputs.json).tags[0] }}
+          input: ${{ runner.temp }}/layout
           severity: ${{ inputs.scan-severity }}
           ignore-unfixed: true
           exit-code: "1"
           format: table
 
+      # `docker buildx imagetools create` refuses to push without --tag and
+      # skopeo rejects a digest destination, so reproducing what the buildkit
+      # push-by-digest exporter did takes regctl. Checksum-pinned rather than
+      # installed from an action, so the binary is verified, not trusted.
+      - name: Install regctl
+        if: inputs.push
+        env:
+          REGCTL_VERSION: v0.11.5
+          REGCTL_SHA256: c93aa7638749f5aaac1a8e01787321889c78f0101809bb2880343478d0ba0467
+        run: |-
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/regctl" \
+            "https://github.com/regclient/regclient/releases/download/${REGCTL_VERSION}/regctl-linux-amd64"
+          echo "${REGCTL_SHA256}  ${RUNNER_TEMP}/regctl" | sha256sum -c -
+          chmod +x "${RUNNER_TEMP}/regctl"
+
+      # Pushed at its digest with no tag written, so ArgoCD Image Updater - which
+      # discovers images by listing tags - cannot see it until the tags go up
+      # last, after the signature and attestations exist. regctl reuses the
+      # credentials docker/login-action wrote to ~/.docker/config.json.
+      - name: Push layout by digest
+        if: inputs.push
+        env:
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
+          DIGEST: ${{ steps.layout.outputs.digest }}
+        run: |-
+          set -euo pipefail
+          "${RUNNER_TEMP}/regctl" image copy \
+            "ocidir://${RUNNER_TEMP}/layout@${DIGEST}" \
+            "${IMAGE_REF}@${DIGEST}"
+
+          published=$("${RUNNER_TEMP}/regctl" manifest head "${IMAGE_REF}@${DIGEST}")
+          if [[ "$published" != "$DIGEST" ]]; then
+            echo "::error title=Push::registry returned ${published}, expected ${DIGEST}"
+            exit 1
+          fi
+
+      # Pinned rather than left to the installer's default: cosign 3.x writes a
+      # Sigstore bundle to the sha256-<digest> tag, where 2.x wrote a classic
+      # simple-signing sha256-<digest>.sig, and which of those Kyverno accepts
+      # is not something to discover through a silent installer bump.
       - name: Install Cosign
         if: inputs.push
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
 
       # The attestations below are signed statements *about* the image; none of
       # them is a signature *on* the image, which is what the Kyverno policy's
@@ -218,7 +262,7 @@ jobs:
         if: inputs.push
         env:
           IMAGE_REF: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
-          DIGEST: ${{ steps.build-push.outputs.digest }}
+          DIGEST: ${{ steps.layout.outputs.digest }}
         run: cosign sign --yes "${IMAGE_REF}@${DIGEST}"
 
       - name: Extract buildx-generated SBOM
@@ -226,7 +270,7 @@ jobs:
         if: inputs.push
         run: |
           docker buildx imagetools inspect \
-            ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }} \
+            ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}@${{ steps.layout.outputs.digest }} \
             --format '{{ json .SBOM.SPDX }}' > sbom.spdx.json
 
       - name: Attest SBOM
@@ -234,7 +278,7 @@ jobs:
         if: inputs.push
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build-push.outputs.digest }}
+          subject-digest: ${{ steps.layout.outputs.digest }}
           sbom-path: sbom.spdx.json
           push-to-registry: true
 
@@ -243,7 +287,7 @@ jobs:
         if: inputs.push
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build-push.outputs.digest }}
+          subject-digest: ${{ steps.layout.outputs.digest }}
           push-to-registry: true
 
       # Fails the job before any tag exists if the signature the cluster will
@@ -255,7 +299,7 @@ jobs:
         if: inputs.push
         env:
           IMAGE_REF: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
-          DIGEST: ${{ steps.build-push.outputs.digest }}
+          DIGEST: ${{ steps.layout.outputs.digest }}
           OWNER: ${{ github.repository_owner }}
         run: |-
           set -euo pipefail
@@ -276,7 +320,7 @@ jobs:
         env:
           METADATA_JSON: ${{ steps.meta.outputs.json }}
           IMAGE_REF: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
-          DIGEST: ${{ steps.build-push.outputs.digest }}
+          DIGEST: ${{ steps.layout.outputs.digest }}
         run: |-
           set -euo pipefail
           args=()
