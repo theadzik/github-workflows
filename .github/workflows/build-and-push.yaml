@@ -263,12 +263,25 @@ jobs:
       # cosign 3.x writes a Sigstore bundle to a sha256-<digest> tag (2.x wrote
       # sha256-<digest>.sig). No allowTags regexp in the homelab ImageUpdater
       # matches either shape, so it stays invisible to deployment discovery.
+      #
+      # Credentials are passed explicitly. cosign reads the image manifest
+      # before signing it, and it does not pick up the docker login from
+      # ~/.docker/config.json the way regctl and the docker CLI in this job do -
+      # it pulled anonymously and Docker Hub answered with its unauthenticated
+      # rate limit, failing the job after the push had already happened.
       - name: Sign image
         if: inputs.push
         env:
           IMAGE_REF: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
           DIGEST: ${{ steps.layout.outputs.digest }}
-        run: cosign sign --yes "${IMAGE_REF}@${DIGEST}"
+          REGISTRY_USERNAME: ${{ env.REPOSITORY }}
+          REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |-
+          set -euo pipefail
+          cosign sign --yes \
+            --registry-username "${REGISTRY_USERNAME}" \
+            --registry-password "${REGISTRY_PASSWORD}" \
+            "${IMAGE_REF}@${DIGEST}"
 
       - name: Extract buildx-generated SBOM
         id: sbom-extract
@@ -306,11 +319,15 @@ jobs:
           IMAGE_REF: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
           DIGEST: ${{ steps.layout.outputs.digest }}
           OWNER: ${{ github.repository_owner }}
+          REGISTRY_USERNAME: ${{ env.REPOSITORY }}
+          REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |-
           set -euo pipefail
           cosign verify \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             --certificate-identity-regexp "^https://github\.com/${OWNER}/.+/\.github/workflows/.+@.+$" \
+            --registry-username "${REGISTRY_USERNAME}" \
+            --registry-password "${REGISTRY_PASSWORD}" \
             "${IMAGE_REF}@${DIGEST}" > /dev/null
           echo "Signature verified for ${IMAGE_REF}@${DIGEST}"
 

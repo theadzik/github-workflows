@@ -52,22 +52,44 @@ one command.
 
 ## 2. The push path has never executed
 
-**Status:** open. Blocked on credentials or a merge.
+**Status:** partially closed 2026-07-31 by
+[blog run 30610770330](https://github.com/theadzik/blog/actions/runs/30610770330), a real
+`2026.7.31-alpha` build. It reached the registry and then failed at `Sign image`:
 
-Everything from `Push layout by digest` onward — the regctl push, `cosign sign`, both
-attestations, `cosign verify`, `Publish tags` — has never run in CI. Pull requests call
-the workflow with `push: false`, so they exercise the build and scan only, and this
-machine has no registry credentials.
+```text
+Error: signing [docker.io/theadzik/zmuda-pro-blog@sha256:456ea2ff…]: accessing image:
+GET https://index.docker.io/v2/theadzik/zmuda-pro-blog/manifests/sha256:456ea2ff…:
+TOOMANYREQUESTS: You have reached your unauthenticated pull rate limit.
+```
 
-The individual links were rehearsed locally against a scratch registry: regctl pushed a
-layout at its digest with no tag written, cosign signed that digest and verified it, and
-`imagetools create` retagged it without changing the digest. What has not been exercised
-is the sequence running as one job with real credentials, keyless OIDC and Docker Hub
-rather than `localhost:5055`.
+**What that run proved.** `regctl image copy` pushed the layout by digest and the digest
+check passed, so the by-digest push works against Docker Hub, not just a scratch registry.
+The `regctl-installer` ran `cosign verify-blob` on its own binary, confirming the
+cosign-before-regctl ordering does what it was ordered for. And the gate behaved
+correctly under failure: the job died before `Publish tags`, and Docker Hub has no
+`2026.7.31-alpha` tag — an orphan digest, nothing deployable, exactly the designed
+failure mode.
 
-**How to settle it:** after the caller PRs merge, `gh workflow run manual-build.yaml` in
-the blog repo with `push: true` against a throwaway tag, then inspect the referrers on the
-resulting digest.
+**Root cause of the failure.** cosign reads the image manifest before signing it, and it
+did not use the `docker login` credentials sitting in `~/.docker/config.json` — the same
+file `regctl` and the docker CLI used successfully in that job. It pulled anonymously and
+hit Docker Hub's unauthenticated rate limit. Fixed by passing `--registry-username` and
+`--registry-password` explicitly to both `cosign sign` and `cosign verify` rather than
+relying on ambient keychain behaviour. Why cosign's keychain misses a config other tools
+read is still unexplained; the explicit flags sidestep it rather than answer it.
+
+**Still unproven:** `cosign sign`, `cosign verify`, both attestations and `Publish tags`.
+The next tag build after repinning is what closes this.
+
+Pull requests call the workflow with `push: false`, so nothing beyond the build and scan
+runs there. Before the alpha build above, the links had only been rehearsed locally
+against a scratch registry: regctl pushing a layout at its digest with no tag written,
+cosign signing that digest and verifying it, `imagetools create` retagging without
+changing the digest. Keyless OIDC and Docker Hub were never in the picture.
+
+**How to settle the rest:** push another alpha tag in the blog repo once it pins an rc
+carrying the cosign credential fix, then read the referrers off the resulting digest — the
+same check settles issue 3.
 
 ## 3. cosign 3.x signature format versus Kyverno 1.18.2
 
