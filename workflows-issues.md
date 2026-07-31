@@ -1,9 +1,10 @@
 # Open issues before the next release
 
 Tracking list for `build-and-push.yaml`. The workflow on `main` is the OCI-layout
-flow (build → scan on disk → push by digest → sign → attest → verify → tag), but it
-is unreleased: `v2.0.0` and `v2` were deleted so nothing can pin a half-finished
-version. `v1` still points at v1.1.0 and is what the open caller PRs use.
+flow (build → scan on disk → push by digest → sign → attest → verify → tag), released
+as `v2.0.0-rc` for testing in the caller repositories. The earlier `v2.0.0` and `v2`
+tags were deleted; there is deliberately no stable `v2` until the push path has run
+for real. `v1` still points at v1.1.0.
 
 Ordered by what could break a build, not by severity of consequence. Resolved entries stay
 in place with their evidence rather than being deleted.
@@ -118,12 +119,14 @@ attestation path and make the step work before the push rather than after.
 Left alone for now because the current form is inherited from v1 and known to work,
 and changing it while 1 and 2 are unresolved would confuse the diagnosis.
 
-## 6. Caller PRs still pin v1.1.0
+## 6. Caller PRs pin the release candidate
 
-**Status:** open. Decision, not work.
+**Status:** in progress.
 
 [homelab#331](https://github.com/theadzik/homelab/pull/331) and
-[blog#111](https://github.com/theadzik/blog/pull/111) pin v1.1.0, which pushes first and
-scans the pushed digest. They are correct and green as they stand; they simply predate
-the layout flow. Either land them and repin later, or hold them until this list is worked
-through and repin once.
+[blog#111](https://github.com/theadzik/blog/pull/111) pin `v2.0.0-rc`, so the two caller
+repositories are the test bed for the layout flow. homelab exercises it on every PR
+(three callers, `push: false`); blog does not, because `website-checks` excludes workflow
+files from its path filter.
+
+Repin to `v2.0.0` once issues 2 and 3 are closed.
