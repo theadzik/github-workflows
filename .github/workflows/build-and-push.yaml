@@ -77,7 +77,7 @@ on:
         required: true
     outputs:
       digest:
-        description: "Digest of the pushed image. Empty when push is false."
+        description: "Digest of the image that was scanned, signed and tagged."
         value: ${{ jobs.build-push-sign.outputs.digest }}
       image-ref:
         description: "Image reference without a tag, for example docker.io/user/name."
@@ -101,12 +101,14 @@ jobs:
       digest: ${{ steps.build-push.outputs.digest }}
       image-ref: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
     steps:
-      # The scan below needs the image in the local docker daemon, which the
-      # buildx docker exporter cannot do for more than one platform.
+      # Two reasons: the build-only path exports to the local docker daemon,
+      # which cannot hold more than one platform, and Trivy scans a single
+      # platform out of a multi-platform index, so the scan would cover less
+      # than what gets signed.
       - name: Reject multi-platform input
         if: contains(inputs.platforms, ',')
         run: |
-          echo "::error title=platforms::multi-platform builds are unsupported; the pre-push scan loads a single-platform image"
+          echo "::error title=platforms::multi-platform builds are unsupported; the scan would not cover every platform that gets signed"
           exit 1
 
       - name: Checkout
@@ -148,62 +150,76 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
           tags: ${{ inputs.tags }}
 
-      # Built locally first so it can be scanned before anything is published.
-      # Nothing consults GitHub check status at deploy time - ArgoCD Image
-      # Updater watches the registry directly - so a scan that ran after the
-      # push could not stop a vulnerable image from being deployed.
+      # One build, one artifact. An earlier version built the image locally to
+      # scan it and then built it again to push, which meant the bytes Trivy
+      # cleared were only presumed identical to the bytes that got signed: a
+      # cache miss, or a base image whose tag moved between the two builds,
+      # would silently break that assumption.
+      #
+      # When publishing, the exporter pushes by digest with no tags, so the
+      # image is not yet discoverable - ArgoCD Image Updater finds images by
+      # listing tags - and every gate below runs against that exact digest
+      # before any tag exists. When not publishing, the same build is exported
+      # to the local docker daemon and scanned there.
       - name: Build image
-        id: build
+        id: build-push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: ${{ inputs.context-path }}
           platforms: ${{ inputs.platforms }}
-          load: true
-          push: false
-          tags: ${{ steps.meta.outputs.tags }}
+          outputs: ${{ inputs.push && format('type=image,name={0}/{1}/{2},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, env.REPOSITORY, env.IMAGE_NAME) || 'type=docker' }}
+          # push-by-digest rejects tags; the docker exporter needs one to give
+          # Trivy something to reference.
+          tags: ${{ !inputs.push && steps.meta.outputs.tags || '' }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # The local `docker` exporter rejects attestations; they are produced
-          # by the push step below instead.
-          provenance: false
-          sbom: false
+          # The local `docker` exporter rejects attestations.
+          provenance: ${{ inputs.push && 'mode=max' || 'false' }}
+          sbom: ${{ inputs.push }}
           build-args: |
             ${{ inputs.build-args }}
 
+      # Scans the digest that was just pushed, not a rebuild of it. Nothing
+      # consults GitHub check status at deploy time, so this failing is what
+      # keeps the image untagged, unsigned and unattested - and therefore
+      # undeployable under the Kyverno policy, which requires all three.
+      #
       # ignore-unfixed: an unfixable finding in a base image cannot be actioned
       # here, and would block every release until upstream published a patch.
       - name: Scan image for vulnerabilities
         if: inputs.scan
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ env.REPOSITORY }}
+          TRIVY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
         with:
-          image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          image-ref: ${{ inputs.push && format('{0}/{1}/{2}@{3}', env.REGISTRY, env.REPOSITORY, env.IMAGE_NAME, steps.build-push.outputs.digest) || fromJSON(steps.meta.outputs.json).tags[0] }}
           severity: ${{ inputs.scan-severity }}
           ignore-unfixed: true
           exit-code: "1"
           format: table
 
-      # Pushed by digest with no tags, so the image is not yet discoverable.
-      # ArgoCD Image Updater finds images by listing tags, so publishing a tag
-      # here - before the attestations below exist - lets a deployment race its
-      # own attestation upload, which the Kyverno Deny policy would reject.
-      # Layers are already in the cache, so this re-exports rather than rebuilds.
-      - name: Push image by digest
-        id: build-push
+      - name: Install Cosign
         if: inputs.push
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: ${{ inputs.context-path }}
-          platforms: ${{ inputs.platforms }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-          labels: ${{ steps.meta.outputs.labels }}
-          annotations: ${{ steps.meta.outputs.annotations }}
-          cache-from: type=gha
-          provenance: mode=max
-          sbom: true
-          build-args: |
-            ${{ inputs.build-args }}
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # The attestations below are signed statements *about* the image; none of
+      # them is a signature *on* the image, which is what the Kyverno policy's
+      # verifyImageSignatures call looks for. Keyless, so the signing identity
+      # is this workflow's OIDC token - the same identity that signs the
+      # attestations, and the one the policy's subjectRegExp matches.
+      #
+      # This writes a sha256-<digest>.sig tag. No allowTags regexp in the
+      # homelab ImageUpdater matches that shape, so it stays invisible to
+      # deployment discovery.
+      - name: Sign image
+        if: inputs.push
+        env:
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
+          DIGEST: ${{ steps.build-push.outputs.digest }}
+        run: cosign sign --yes "${IMAGE_REF}@${DIGEST}"
 
       - name: Extract buildx-generated SBOM
         id: sbom-extract
@@ -230,8 +246,28 @@ jobs:
           subject-digest: ${{ steps.build-push.outputs.digest }}
           push-to-registry: true
 
-      # Only now does the image become discoverable, with its attestations
-      # already in place. `imagetools create` re-pushes the same manifest under
+      # Fails the job before any tag exists if the signature the cluster will
+      # demand is not the one this workflow just wrote. The identity pattern
+      # mirrors the subjectRegExp in the homelab ImageValidatingPolicy, so a
+      # signature that would be rejected at admission is rejected here instead,
+      # where it is a red check rather than a stuck rollout.
+      - name: Verify signature
+        if: inputs.push
+        env:
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
+          DIGEST: ${{ steps.build-push.outputs.digest }}
+          OWNER: ${{ github.repository_owner }}
+        run: |-
+          set -euo pipefail
+          cosign verify \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity-regexp "^https://github\.com/${OWNER}/.+/\.github/workflows/.+@.+$" \
+            "${IMAGE_REF}@${DIGEST}" > /dev/null
+          echo "Signature verified for ${IMAGE_REF}@${DIGEST}"
+
+      # Only now does the image become discoverable, with its signature and
+      # attestations already in place. `imagetools create` re-pushes the same
+      # manifest under
       # each tag rather than wrapping it in a new index, so the digest is
       # unchanged and the attestations - attached to that digest - stay
       # findable. Verified against a scratch registry.

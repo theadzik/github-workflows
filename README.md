@@ -6,18 +6,27 @@ reusable workflow is only callable from private repositories owned by the same u
 
 ## `build-and-push.yaml`
 
-Builds a container image, scans it, pushes it by digest, attests SBOM and provenance,
-and only then publishes the tags.
+Builds a container image once, pushes it by digest, then scans, signs and attests that
+exact digest — and only publishes tags if all of it passed.
 
-The tag is published last on purpose: ArgoCD Image Updater discovers images by listing
-tags, so a tag that appears before the attestations exist lets a deployment race its own
-attestation upload — which the Kyverno `Deny` policy would reject. `imagetools create`
-re-pushes the same manifest under each tag rather than wrapping it in a new index, so the
-digest is unchanged and the attestations attached to it stay findable.
+**One artifact all the way through.** The build runs once. Everything after it —
+the Trivy scan, the cosign signature, the SBOM and provenance attestations — references
+the digest that build produced. Nothing is rebuilt or re-exported in between, so the
+bytes that were scanned are provably the bytes that were signed and deployed.
 
-The image is also built locally and scanned before anything is pushed. Nothing consults
-GitHub check status at deploy time, so a scan that ran after the push could not stop a
-vulnerable image from being deployed.
+**The tag is the gate, not the push.** ArgoCD Image Updater discovers images by listing
+tags, so an image pushed by digest with no tags is inert: nothing can select it, and the
+Kyverno `ImageValidatingPolicy` would reject it anyway while it has no signature or
+attestations. Publishing tags last means a failed scan leaves an orphan digest rather
+than a deployable image. `imagetools create` re-pushes the same manifest under each tag
+rather than wrapping it in a new index, so the digest is unchanged and the referrers
+attached to it stay findable.
+
+**Signed, not just attested.** `actions/attest` produces signed statements *about* the
+image; `cosign sign` produces a signature *on* it, which is what Kyverno's
+`verifyImageSignatures` looks for. Both use the same keyless workflow identity. The
+signature is verified with `cosign verify` before any tag is published, so an identity
+the cluster would refuse fails the build instead of the rollout.
 
 ### Usage
 
