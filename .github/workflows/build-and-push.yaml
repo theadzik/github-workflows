@@ -291,6 +291,29 @@ jobs:
           token=$(curl -fsSL -u "${REGISTRY_USERNAME}:${REGISTRY_PASSWORD}" \
             "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${REPO_PATH}:pull,push" \
             | jq -er .token)
+
+          # Docker Hub answers a pull-scope request for a public repository with
+          # HTTP 200 and an anonymous token when credentials are rejected, so a
+          # successful curl is not by itself proof of authentication. An
+          # anonymous token carries an empty `sub` and a pull_limit parameter.
+          claims=$(cut -d. -f2 <<< "${token}" | tr '_-' '/+' | base64 -d 2>/dev/null || true)
+          if [[ -z "$(jq -r '.sub // empty' <<< "${claims}")" ]]; then
+            echo "::error title=Registry token::Docker Hub issued an anonymous token; the credentials were not accepted"
+            jq -c '{sub, access}' <<< "${claims}" || true
+            exit 1
+          fi
+
+          # Establishes whether an authenticated read of this exact manifest
+          # works from this runner at this moment. If this succeeds and cosign
+          # still reports an unauthenticated pull, the problem is inside cosign,
+          # not the credentials or the account's rate limit.
+          echo "Authenticated manifest read:"
+          curl -s -o /dev/null -D- \
+            -H "Authorization: Bearer ${token}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json" \
+            "https://index.docker.io/v2/${REPO_PATH}/manifests/${DIGEST}" \
+            | grep -iE '^HTTP|ratelimit' || true
+
           cosign sign --yes --registry-token "${token}" "${IMAGE_REF}@${DIGEST}"
 
       - name: Extract buildx-generated SBOM
