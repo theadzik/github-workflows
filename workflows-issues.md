@@ -106,8 +106,19 @@ degradation into a loud 401 on the credentials themselves. `--registry-password`
 auth, which is right for a Docker Hub PAT but leaves the token exchange to cosign;
 `--registry-token` is the bearer token that exchange would have produced.
 
-**Still unproven:** `cosign sign`, `cosign verify`, both attestations and `Publish tags`.
-The next tag build after repinning is what closes this.
+**Closed 2026-07-31** by
+[run 30649345089](https://github.com/theadzik/blog/actions/runs/30649345089), which ran the
+whole chain against Docker Hub for the first time: build → layout → scan → push by digest
+→ sign → attest SBOM → attest provenance → verify → publish tag. The digest now carries
+three referrers, all `application/vnd.dev.sigstore.bundle.v0.3+json`:
+
+| Referrer | Predicate |
+| --- | --- |
+| `09f333a…` | `https://spdx.dev/Document/v2.3` |
+| `10ba8ab…` | `https://sigstore.dev/cosign/sign/v1` |
+| `aa39e59…` | `https://slsa.dev/provenance/v1` |
+
+What is *not* closed is why it worked. See issue 7.
 
 Pull requests call the workflow with `push: false`, so nothing beyond the build and scan
 runs there. Before the alpha build above, the links had only been rehearsed locally
@@ -115,23 +126,35 @@ against a scratch registry: regctl pushing a layout at its digest with no tag wr
 cosign signing that digest and verifying it, `imagetools create` retagging without
 changing the digest. Keyless OIDC and Docker Hub were never in the picture.
 
-**How to settle the rest:** push another alpha tag in the blog repo once it pins an rc
-carrying the cosign credential fix, then read the referrers off the resulting digest — the
-same check settles issue 3.
-
 ## 3. cosign 3.x signature format versus Kyverno 1.18.2
 
-**Status:** open. Depends on 2.
+**Status:** open, but narrowed to one question.
 
-cosign is pinned to `v3.0.6`. Version 3 has no `--new-bundle-format` flag: it writes a
-Sigstore bundle to a `sha256-<digest>` tag, where 2.x wrote a classic simple-signing
-`sha256-<digest>.sig`. Confirmed locally — after signing, the scratch registry listed
-exactly one tag, `sha256-ec0cb064…`, with no `.sig` suffix.
+cosign is pinned to `v3.0.6`, which has no `--new-bundle-format` flag. Where it puts the
+signature turned out to depend on the signing config: locally, with a rekor-less
+`--signing-config`, it wrote a `sha256-<digest>` tag; on the runner with the default
+config it wrote an **OCI referrer** carrying the predicate
+`https://sigstore.dev/cosign/sign/v1`. Neither is the classic `sha256-<digest>.sig` that
+2.x produced.
 
-Whether `verifyImageSignatures` in the `ImageValidatingPolicy` accepts that shape is
-unconfirmed. Kyverno 1.18.2 is recent and sigstore-go based, and it already verifies the
-bundle-format attestations `actions/attest` produces, so it very likely does. "Very
-likely" is not a basis for a policy that gates admission.
+The signing identity is confirmed correct — the certificate SAN on the published signature
+reads:
+
+```text
+URI:https://github.com/theadzik/github-workflows/.github/workflows/build-and-push.yaml@68e8afe…
+```
+
+which the policy's `subjectRegExp`
+(`^https://github.com/theadzik/.+/.github/workflows/build-and-push.yaml@.+$`) matches.
+
+So the only open question is whether `verifyImageSignatures` reads referrer-style Sigstore
+bundles. Kyverno 1.18.2 is sigstore-go based and already verifies the bundle-format
+attestations `actions/attest` produces, so it very likely does — but "very likely" is not
+a basis for a policy that gates admission.
+
+**Now testable:** `theadzik/zmuda-pro-blog:tellme` carries a real signature with a matching
+identity. Admitting a pod from it, or letting the background scan reach it, answers this —
+provided the 429s in issue 4 do not mask the result.
 
 If it turns out to want the classic layout, the fix is one line: pin a 2.x release in the
 installer's `cosign-release` input.
@@ -179,10 +202,44 @@ and changing it while 1 and 2 are unresolved would confuse the diagnosis.
 
 **Status:** in progress.
 
-[homelab#331](https://github.com/theadzik/homelab/pull/331) and
-[blog#111](https://github.com/theadzik/blog/pull/111) pin `v2.0.0-rc`, so the two caller
-repositories are the test bed for the layout flow. homelab exercises it on every PR
-(three callers, `push: false`); blog does not, because `website-checks` excludes workflow
-files from its path filter.
+blog tracks the release candidates on `main` and is the only repository exercising the
+push path; [homelab#331](https://github.com/theadzik/homelab/pull/331) is still open and
+its three callers run with `push: false`, so they cover the build and layout only.
 
-Repin to `v2.0.0` once issues 2 and 3 are closed.
+Repin to `v2.0.0` once issues 3 and 7 are closed.
+
+## 7. cosign authenticates non-deterministically on runners
+
+**Status:** open. The reason the pipeline works is not understood.
+
+Four runs, one command. `cosign sign` failed with Docker Hub's unauthenticated pull rate
+limit at 06:50, 07:07 and 16:41, then succeeded at 16:59 — with a **byte-identical
+invocation**. The diff between the rc it failed on and the rc it passed on touches nothing
+in the command; only diagnostics were added ahead of it.
+
+Everything the credentials could be blamed for has been excluded. In the successful run the
+minted token was demonstrably authenticated:
+
+```text
+HTTP/2 200
+docker-ratelimit-source: theadzik      # the account, not an IP
+x-ratelimit-limit: 200;w=3600
+x-ratelimit-remaining: 150;w=3600
+```
+
+The most economical explanation is that cosign's manifest read is anonymous in all four
+runs, and Docker Hub's anonymous limit is per-IP (100 per 6h, shared by everything on that
+GitHub runner address). Three runs landed on an exhausted address, one did not. If that is
+right the pipeline is a lottery rather than fixed, and it will fail again.
+
+**The measurement, added in rc.5.** Each rate-limit reading is itself one authenticated
+pull, so reading either side of `cosign sign` brackets what cosign spends:
+
+- `before - after - 1 == 0` → cosign's reads never touched the account: it is anonymous,
+  and the passing run was luck.
+- `before - after - 1 >= 1` → cosign used the token and the flow is genuinely authenticated.
+
+rc.5 also supplies credentials three ways at once — an isolated `DOCKER_CONFIG` for the
+keychain, `--registry-token`, and the username and password the token was minted from — so
+that no code path inside cosign can end up anonymous. The measurement reports which of
+those it actually used.

@@ -222,7 +222,7 @@ jobs:
         if: inputs.push
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          cosign-release: v3.0.6
+          cosign-release: v3.1.2
 
       # `docker buildx imagetools create` refuses to push without --tag and
       # skopeo rejects a digest destination, so reproducing what the buildkit
@@ -260,22 +260,26 @@ jobs:
       # is this workflow's OIDC token - the same identity that signs the
       # attestations, and the one the policy's subjectRegExp matches.
       #
-      # cosign 3.x writes a Sigstore bundle to a sha256-<digest> tag (2.x wrote
-      # sha256-<digest>.sig). No allowTags regexp in the homelab ImageUpdater
-      # matches either shape, so it stays invisible to deployment discovery.
+      # cosign 3.x writes the signature as an OCI referrer carrying the
+      # predicate https://sigstore.dev/cosign/sign/v1, not the sha256-<digest>
+      # .sig tag 2.x used. Nothing is written that any allowTags regexp in the
+      # homelab ImageUpdater matches, so it stays invisible to deployment
+      # discovery either way.
       #
-      # The bearer token is minted here rather than left to cosign. Neither the
-      # ambient docker login nor --registry-username/--registry-password got
-      # cosign an authenticated pull of the manifest it signs: both runs ended
-      # in Docker Hub's unauthenticated rate limit, after the push had already
-      # happened.
+      # Registry credentials are supplied three ways because cosign has failed
+      # to use each of them at least once on a runner: an isolated docker config
+      # for its keychain, a minted bearer token for --registry-token, and the
+      # username/password the token was minted from. Locally every one of them
+      # authenticates, against a basic-auth registry and a bearer-flow one, in
+      # the keyless path and the keyed one. On the runner the same invocation
+      # failed at 16:41 and succeeded at 16:59 with no change to the command, so
+      # the deciding factor is environmental - most likely whether the runner's
+      # shared IP still had anonymous pull quota. The measurement below settles
+      # which it is rather than assuming the belt-and-braces worked.
       #
-      # Why that failed silently: for a public repository, Docker Hub's token
-      # endpoint answers a pull-scope request with HTTP 200 and an *anonymous*
-      # token even when credentials are absent or rejected. cosign sees a valid
-      # token and no auth error, and the problem only surfaces later as a rate
-      # limit. Minting the token with `curl -f -u` turns that into a loud 401
-      # on the credentials themselves.
+      # Note Docker Hub answers a pull-scope request for a public repository
+      # with HTTP 200 and an *anonymous* token when credentials are rejected, so
+      # a successful mint proves nothing on its own; the `sub` check does.
       - name: Sign image
         if: inputs.push
         env:
@@ -284,18 +288,23 @@ jobs:
           REPO_PATH: ${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
           REGISTRY_USERNAME: ${{ env.REPOSITORY }}
           REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKER_CONFIG: ${{ runner.temp }}/cosign-docker
         run: |-
           set -euo pipefail
+
+          # Scoped to this step and the verify step, so it cannot disturb the
+          # docker CLI's own config elsewhere in the job.
+          mkdir -p "${DOCKER_CONFIG}"
+          auth=$(printf '%s:%s' "${REGISTRY_USERNAME}" "${REGISTRY_PASSWORD}" | base64 -w0)
+          jq -n --arg a "${auth}" \
+            '{auths: {"https://index.docker.io/v1/": {auth: $a}}}' > "${DOCKER_CONFIG}/config.json"
+
           # push scope as well as pull: cosign writes the signature back to the
           # same repository.
           token=$(curl -fsSL -u "${REGISTRY_USERNAME}:${REGISTRY_PASSWORD}" \
             "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${REPO_PATH}:pull,push" \
             | jq -er .token)
 
-          # Docker Hub answers a pull-scope request for a public repository with
-          # HTTP 200 and an anonymous token when credentials are rejected, so a
-          # successful curl is not by itself proof of authentication. An
-          # anonymous token carries an empty `sub` and a pull_limit parameter.
           claims=$(cut -d. -f2 <<< "${token}" | tr '_-' '/+' | base64 -d 2>/dev/null || true)
           if [[ -z "$(jq -r '.sub // empty' <<< "${claims}")" ]]; then
             echo "::error title=Registry token::Docker Hub issued an anonymous token; the credentials were not accepted"
@@ -303,18 +312,28 @@ jobs:
             exit 1
           fi
 
-          # Establishes whether an authenticated read of this exact manifest
-          # works from this runner at this moment. If this succeeds and cosign
-          # still reports an unauthenticated pull, the problem is inside cosign,
-          # not the credentials or the account's rate limit.
-          echo "Authenticated manifest read:"
-          curl -s -o /dev/null -D- \
-            -H "Authorization: Bearer ${token}" \
-            -H "Accept: application/vnd.oci.image.index.v1+json" \
-            "https://index.docker.io/v2/${REPO_PATH}/manifests/${DIGEST}" \
-            | grep -iE '^HTTP|ratelimit' || true
+          # Each call is itself one authenticated pull, so the reading either
+          # side of cosign brackets whatever cosign spends.
+          remaining() {
+            curl -s -o /dev/null -D- \
+              -H "Authorization: Bearer ${token}" \
+              -H "Accept: application/vnd.oci.image.index.v1+json" \
+              "https://index.docker.io/v2/${REPO_PATH}/manifests/${DIGEST}" \
+              | tr -d '\r' | sed -nE 's/^ratelimit-remaining: ([0-9]+).*/\1/Ip' | head -1
+          }
+          before=$(remaining || true)
 
           cosign sign --yes --registry-token "${token}" "${IMAGE_REF}@${DIGEST}"
+
+          after=$(remaining || true)
+          if [[ -n "${before}" && -n "${after}" ]]; then
+            # Subtract the second reading's own pull to leave cosign's spend.
+            used=$(( before - after - 1 ))
+            echo "Account pull quota: ${before} -> ${after}; cosign spent ${used}"
+            if (( used <= 0 )); then
+              echo "::warning title=cosign auth::cosign's registry reads did not count against this account, so it authenticated with none of the three credentials it was given. This job succeeded only because the runner's shared IP still had anonymous pull quota."
+            fi
+          fi
 
       - name: Extract buildx-generated SBOM
         id: sbom-extract
@@ -355,6 +374,9 @@ jobs:
           REPO_PATH: ${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
           REGISTRY_USERNAME: ${{ env.REPOSITORY }}
           REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
+          # Written by the signing step; reused so this step's keychain is
+          # authenticated too.
+          DOCKER_CONFIG: ${{ runner.temp }}/cosign-docker
         run: |-
           set -euo pipefail
           # Minted fresh rather than reused from the signing step: these tokens
