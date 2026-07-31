@@ -202,21 +202,30 @@ jobs:
           exit-code: "1"
           format: table
 
+      # Installed before regctl on purpose: the regctl installer verifies its
+      # download with `cosign verify-blob` against regclient's release identity,
+      # but only when cosign is already on PATH - otherwise it logs that
+      # metadata is unavailable and installs an unverified binary. Reordering
+      # these two steps silently drops that check.
+      #
+      # Pinned rather than left to the installer's default: cosign 3.x writes a
+      # Sigstore bundle to the sha256-<digest> tag, where 2.x wrote a classic
+      # simple-signing sha256-<digest>.sig, and which of those Kyverno accepts
+      # is not something to discover through a silent installer bump.
+      - name: Install Cosign
+        if: inputs.push
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+
       # `docker buildx imagetools create` refuses to push without --tag and
       # skopeo rejects a digest destination, so reproducing what the buildkit
-      # push-by-digest exporter did takes regctl. Checksum-pinned rather than
-      # installed from an action, so the binary is verified, not trusted.
+      # push-by-digest exporter did takes regctl.
       - name: Install regctl
         if: inputs.push
-        env:
-          REGCTL_VERSION: v0.11.5
-          REGCTL_SHA256: c93aa7638749f5aaac1a8e01787321889c78f0101809bb2880343478d0ba0467
-        run: |-
-          set -euo pipefail
-          curl -fsSL -o "${RUNNER_TEMP}/regctl" \
-            "https://github.com/regclient/regclient/releases/download/${REGCTL_VERSION}/regctl-linux-amd64"
-          echo "${REGCTL_SHA256}  ${RUNNER_TEMP}/regctl" | sha256sum -c -
-          chmod +x "${RUNNER_TEMP}/regctl"
+        uses: regclient/actions/regctl-installer@1b705e32d40851370799ea5814e83d0a5f6a70dc # v0.1.0
+        with:
+          release: v0.11.5
 
       # Pushed at its digest with no tag written, so ArgoCD Image Updater - which
       # discovers images by listing tags - cannot see it until the tags go up
@@ -229,25 +238,15 @@ jobs:
           DIGEST: ${{ steps.layout.outputs.digest }}
         run: |-
           set -euo pipefail
-          "${RUNNER_TEMP}/regctl" image copy \
+          regctl image copy \
             "ocidir://${RUNNER_TEMP}/layout@${DIGEST}" \
             "${IMAGE_REF}@${DIGEST}"
 
-          published=$("${RUNNER_TEMP}/regctl" manifest head "${IMAGE_REF}@${DIGEST}")
+          published=$(regctl manifest head "${IMAGE_REF}@${DIGEST}")
           if [[ "$published" != "$DIGEST" ]]; then
             echo "::error title=Push::registry returned ${published}, expected ${DIGEST}"
             exit 1
           fi
-
-      # Pinned rather than left to the installer's default: cosign 3.x writes a
-      # Sigstore bundle to the sha256-<digest> tag, where 2.x wrote a classic
-      # simple-signing sha256-<digest>.sig, and which of those Kyverno accepts
-      # is not something to discover through a silent installer bump.
-      - name: Install Cosign
-        if: inputs.push
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        with:
-          cosign-release: v3.0.6
 
       # The attestations below are signed statements *about* the image; none of
       # them is a signature *on* the image, which is what the Kyverno policy's
@@ -255,9 +254,9 @@ jobs:
       # is this workflow's OIDC token - the same identity that signs the
       # attestations, and the one the policy's subjectRegExp matches.
       #
-      # This writes a sha256-<digest>.sig tag. No allowTags regexp in the
-      # homelab ImageUpdater matches that shape, so it stays invisible to
-      # deployment discovery.
+      # cosign 3.x writes a Sigstore bundle to a sha256-<digest> tag (2.x wrote
+      # sha256-<digest>.sig). No allowTags regexp in the homelab ImageUpdater
+      # matches either shape, so it stays invisible to deployment discovery.
       - name: Sign image
         if: inputs.push
         env:

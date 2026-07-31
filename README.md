@@ -97,9 +97,12 @@ more than the calling job has.
 
 ### Pinned tools
 
-`regctl` is downloaded and checksum-verified rather than installed from an action, so the
-binary is verified instead of trusted. Bumping it means updating both `REGCTL_VERSION` and
-`REGCTL_SHA256` in the `Install regctl` step — Dependabot does not track it.
+`regctl` is installed with `regclient/actions/regctl-installer`, pinned by SHA and asked
+for a specific `release`. That installer verifies the downloaded binary with
+`cosign verify-blob` against regclient's release identity — **but only if cosign is
+already on `PATH`**, otherwise it logs that metadata is unavailable and installs an
+unverified binary. That is why `Install Cosign` runs first; reordering the two steps
+silently drops the check.
 
 `cosign` is pinned to `v3.0.6` via the installer's `cosign-release` input. cosign 3.x
 writes a Sigstore bundle to the `sha256-<digest>` tag; 2.x wrote a classic simple-signing
