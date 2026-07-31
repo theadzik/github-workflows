@@ -5,28 +5,43 @@ flow (build → scan on disk → push by digest → sign → attest → verify �
 is unreleased: `v2.0.0` and `v2` were deleted so nothing can pin a half-finished
 version. `v1` still points at v1.1.0 and is what the open caller PRs use.
 
-Ordered by what could break a build, not by severity of consequence.
+Ordered by what could break a build, not by severity of consequence. Resolved entries stay
+in place with their evidence rather than being deleted.
 
-## 1. `trivy-action`'s `input:` has only been proven on the CLI
+## 1. `trivy-action`'s `input:` with a directory — RESOLVED
 
-**Status:** in progress.
+**Status:** resolved 2026-07-31, no workflow change needed.
 
 The scan step passes `input: ${{ runner.temp }}/layout` — a *directory* holding an OCI
-layout, not the tar file the parameter is usually given.
+layout, not the tar file the parameter's description (`reference of tar file to scan`)
+suggests. Settled by reading the action at its pinned SHA and replaying its entrypoint
+locally with the environment it builds.
 
-What was actually verified: `trivy image --input layout` on the command line, against a
-layout containing an image manifest plus a buildkit attestation manifest. Trivy read it,
-picked the image manifest rather than the attestation, and reported the two fixable HIGH
-findings in `alpine:3.19`.
+The path the value takes is not obvious. `input:` becomes `INPUT_INPUT`, which
+`set_env_var_if_provided "TRIVY_INPUT"` writes into a `trivy_envs.txt` that the entrypoint
+sources. The entrypoint then runs:
 
-What was not verified: that `aquasecurity/trivy-action` passes the parameter through to
-the same `--input` flag, that it accepts a directory where it may expect a file, and that
-it does not require `image-ref` alongside it. If any of that is wrong, every build fails
-at the scan step — which is why this is first.
+```bash
+cmd=("$TRIVY_CMD" "$scanType" "$scanRef")   # scanType=image, scanRef="." by default
+```
 
-**How to settle it:** read the action at the pinned SHA and replay its entrypoint locally
-with the same environment it would set in CI. A live run in a throwaway branch would be
-conclusive, but needs a push.
+So the actual command is `trivy image .` with `TRIVY_INPUT` set in the environment — the
+positional argument is a bare dot, and the scan target arrives out of band. It works
+because `TRIVY_INPUT` takes precedence over the positional argument.
+
+Verified against trivy **v0.70.0**, the version `trivy-action` pins by default (not the
+newer 0.72.0 that happened to be on the workstation):
+
+| Case | Result |
+| --- | --- |
+| Layout dir, `severity=HIGH,CRITICAL`, `exit-code=1` | scans the image manifest, ignores the attestation manifest, reports the 2 fixable HIGH in alpine 3.19, **exit 1** |
+| Same layout, `severity=CRITICAL` (none present) | reports clean, **exit 0** |
+
+So the gate fails builds when it should and passes them when it should, on a directory.
+
+One constraint this exposes: `image-ref` must stay unset. It is the only thing that
+changes `scanRef` away from `"."`, and mixing the two would leave two competing targets in
+one command.
 
 ## 2. The push path has never executed
 

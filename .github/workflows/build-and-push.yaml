@@ -190,6 +190,12 @@ jobs:
       # keeps the image out of the registry entirely rather than leaving an
       # orphan digest behind.
       #
+      # `input` accepts an OCI layout directory even though it is documented as
+      # a tar file: the action exports it as TRIVY_INPUT and runs `trivy image .`,
+      # where TRIVY_INPUT wins over the positional argument. Do not add
+      # `image-ref` here - it is the one input that replaces that dot, which
+      # would leave the command with two competing targets.
+      #
       # ignore-unfixed: an unfixable finding in a base image cannot be actioned
       # here, and would block every release until upstream published a patch.
       - name: Scan image for vulnerabilities
