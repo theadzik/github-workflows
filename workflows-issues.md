@@ -40,6 +40,12 @@ newer 0.72.0 that happened to be on the workstation):
 
 So the gate fails builds when it should and passes them when it should, on a directory.
 
+Still local-only evidence: homelab's three callers all set `scan: false`, so no CI run has
+executed this step. Its CI runs did confirm the layout export and digest read
+(`exporting to oci image format` → `Built sha256:8cbbf7db…`). Covering the scan in CI
+would take one caller set to `scan: true` with `scan-severity: CRITICAL`, which these
+images pass — they have fixable HIGH findings but no CRITICAL ones.
+
 One constraint this exposes: `image-ref` must stay unset. It is the only thing that
 changes `scanRef` away from `"."`, and mixing the two would leave two competing targets in
 one command.
