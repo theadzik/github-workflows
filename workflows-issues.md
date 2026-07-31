@@ -70,13 +70,41 @@ correctly under failure: the job died before `Publish tags`, and Docker Hub has 
 `2026.7.31-alpha` tag — an orphan digest, nothing deployable, exactly the designed
 failure mode.
 
-**Root cause of the failure.** cosign reads the image manifest before signing it, and it
-did not use the `docker login` credentials sitting in `~/.docker/config.json` — the same
-file `regctl` and the docker CLI used successfully in that job. It pulled anonymously and
-hit Docker Hub's unauthenticated rate limit. Fixed by passing `--registry-username` and
-`--registry-password` explicitly to both `cosign sign` and `cosign verify` rather than
-relying on ambient keychain behaviour. Why cosign's keychain misses a config other tools
-read is still unexplained; the explicit flags sidestep it rather than answer it.
+**The cosign authentication problem.** cosign reads the image manifest before signing it,
+and it did so anonymously — twice. First with the ambient `docker login` (the same
+`~/.docker/config.json` that `regctl` and the docker CLI used successfully in that job),
+then again in `2026.7.31-rc2` with `--registry-username` / `--registry-password` passed
+explicitly. Both ended at Docker Hub's unauthenticated pull rate limit.
+
+The account was not over its limit: `regctl manifest head` — an authenticated manifest
+read — succeeded seconds earlier in the same job.
+
+What was ruled out, each by experiment rather than reasoning:
+
+| Hypothesis | Test | Result |
+| --- | --- | --- |
+| `secrets: inherit` does not reach a workflow in another repo | `docker/login-action` output, step env | `Login Succeeded!`, `REGISTRY_PASSWORD: ***` — secret arrives |
+| The flags are ignored by cosign | auth-required local registry, credentials only via flags | 404 with flags vs `UNAUTHORIZED` without — flags work |
+| Broken in the pinned v3.0.6, fixed later | same test on v3.0.6 and v3.1.2 | both authenticate |
+| Only works for Basic-auth registries, not Docker Hub's bearer flow | same test against ghcr.io | `DENIED` without flags, 404 with — bearer flow works |
+| Docker Hub answers with 429 before issuing a challenge | unauthenticated GET to the manifest | `401` + `WWW-Authenticate: Bearer` — challenge is issued |
+| The flags never reach the failing call | read `sign.go` at v3.0.6 | `regOpts.ClientOpts(ctx)` is passed to the `ociremote.SignedEntity` that raises `accessing image` |
+
+So the plumbing is correct everywhere it can be observed, and the runner behaviour remains
+unexplained.
+
+**What makes it silent.** For a public repository, Docker Hub's token endpoint answers a
+pull-scope request with HTTP 200 and an *anonymous* token even when credentials are absent
+or rejected. cosign sees a valid token and no error; the problem only appears later as a
+rate limit on a request that was never authenticated.
+
+**The fix.** Mint the bearer token in the step with `curl -f -u` and hand it to cosign via
+`--registry-token`, for both `sign` and `verify`. cosign then sends
+`Authorization: Bearer` directly and negotiates nothing. Validated against a bearer-flow
+registry: minted token → authenticated, no token → `DENIED`. It also converts the silent
+degradation into a loud 401 on the credentials themselves. `--registry-password` is basic
+auth, which is right for a Docker Hub PAT but leaves the token exchange to cosign;
+`--registry-token` is the bearer token that exchange would have produced.
 
 **Still unproven:** `cosign sign`, `cosign verify`, both attestations and `Publish tags`.
 The next tag build after repinning is what closes this.

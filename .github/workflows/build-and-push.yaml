@@ -264,24 +264,34 @@ jobs:
       # sha256-<digest>.sig). No allowTags regexp in the homelab ImageUpdater
       # matches either shape, so it stays invisible to deployment discovery.
       #
-      # Credentials are passed explicitly. cosign reads the image manifest
-      # before signing it, and it does not pick up the docker login from
-      # ~/.docker/config.json the way regctl and the docker CLI in this job do -
-      # it pulled anonymously and Docker Hub answered with its unauthenticated
-      # rate limit, failing the job after the push had already happened.
+      # The bearer token is minted here rather than left to cosign. Neither the
+      # ambient docker login nor --registry-username/--registry-password got
+      # cosign an authenticated pull of the manifest it signs: both runs ended
+      # in Docker Hub's unauthenticated rate limit, after the push had already
+      # happened.
+      #
+      # Why that failed silently: for a public repository, Docker Hub's token
+      # endpoint answers a pull-scope request with HTTP 200 and an *anonymous*
+      # token even when credentials are absent or rejected. cosign sees a valid
+      # token and no auth error, and the problem only surfaces later as a rate
+      # limit. Minting the token with `curl -f -u` turns that into a loud 401
+      # on the credentials themselves.
       - name: Sign image
         if: inputs.push
         env:
           IMAGE_REF: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
           DIGEST: ${{ steps.layout.outputs.digest }}
+          REPO_PATH: ${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
           REGISTRY_USERNAME: ${{ env.REPOSITORY }}
           REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |-
           set -euo pipefail
-          cosign sign --yes \
-            --registry-username "${REGISTRY_USERNAME}" \
-            --registry-password "${REGISTRY_PASSWORD}" \
-            "${IMAGE_REF}@${DIGEST}"
+          # push scope as well as pull: cosign writes the signature back to the
+          # same repository.
+          token=$(curl -fsSL -u "${REGISTRY_USERNAME}:${REGISTRY_PASSWORD}" \
+            "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${REPO_PATH}:pull,push" \
+            | jq -er .token)
+          cosign sign --yes --registry-token "${token}" "${IMAGE_REF}@${DIGEST}"
 
       - name: Extract buildx-generated SBOM
         id: sbom-extract
@@ -319,15 +329,20 @@ jobs:
           IMAGE_REF: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
           DIGEST: ${{ steps.layout.outputs.digest }}
           OWNER: ${{ github.repository_owner }}
+          REPO_PATH: ${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
           REGISTRY_USERNAME: ${{ env.REPOSITORY }}
           REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |-
           set -euo pipefail
+          # Minted fresh rather than reused from the signing step: these tokens
+          # last about five minutes and the attestations run in between.
+          token=$(curl -fsSL -u "${REGISTRY_USERNAME}:${REGISTRY_PASSWORD}" \
+            "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${REPO_PATH}:pull" \
+            | jq -er .token)
           cosign verify \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             --certificate-identity-regexp "^https://github\.com/${OWNER}/.+/\.github/workflows/.+@.+$" \
-            --registry-username "${REGISTRY_USERNAME}" \
-            --registry-password "${REGISTRY_PASSWORD}" \
+            --registry-token "${token}" \
             "${IMAGE_REF}@${DIGEST}" > /dev/null
           echo "Signature verified for ${IMAGE_REF}@${DIGEST}"
 
