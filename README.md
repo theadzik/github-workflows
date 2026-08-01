@@ -39,6 +39,8 @@ the cluster would refuse fails the build instead of the rollout.
 
 ### Usage
 
+Publishing to **ghcr.io** — no registry secret needed, the job token does it:
+
 ```yaml
 jobs:
   build-and-push:
@@ -48,9 +50,10 @@ jobs:
       id-token: write
       attestations: write
       artifact-metadata: write
+      packages: write          # ghcr.io only
     with:
+      registry: ghcr.io
       image-name: my-image
-      context-path: .
       tags: |
         type=raw,value=main
         type=sha
@@ -58,10 +61,26 @@ jobs:
     secrets: inherit
 ```
 
-`secrets: inherit` passes the caller's `DOCKERHUB_TOKEN`. The registry username comes from
-the caller repository's `DOCKERHUB_USERNAME` variable unless `registry-username` is set.
-The `permissions` block is required in the caller: a called workflow cannot grant itself
-more than the calling job has.
+Publishing to **docker.io** is the same call without `packages: write` and without the
+`registry` input; it authenticates with the caller's `DOCKERHUB_TOKEN`, which
+`secrets: inherit` passes.
+
+**The `permissions` block belongs to the caller, and it is not optional.** This workflow
+deliberately declares none of its own, because a called workflow that declares permissions
+*replaces* what it inherits rather than adding to it — and one that asks for more than the
+caller granted fails the run at startup. Both were verified rather than assumed. Omitting
+the block here is what lets a Docker Hub caller and a GHCR caller share one workflow.
+
+| | `docker.io` | `ghcr.io` |
+| --- | --- | --- |
+| Namespace | `vars.DOCKERHUB_USERNAME` | the GitHub owner |
+| Credential | `secrets.DOCKERHUB_TOKEN` | the job's `GITHUB_TOKEN` |
+| Extra permission | none | `packages: write` |
+| Pull rate limits | 200/hour per account | none for public images |
+
+`dhi.io` (or whatever `extra-registry` names) is logged in with the Docker account
+regardless of where the build publishes, since that is where base images come from. That
+login is skipped when no `DOCKERHUB_TOKEN` is available.
 
 ### Inputs
 
@@ -77,9 +96,9 @@ more than the calling job has.
 | `push` | `true` | `false` builds and scans only, for pull requests. |
 | `scan` | `true` | Fail on fixable findings before anything is pushed. |
 | `scan-severity` | `HIGH,CRITICAL` | Trivy severities that fail the build. |
-| `registry` | `docker.io` | Registry to push to. |
-| `registry-username` | *(`vars.DOCKERHUB_USERNAME`)* | Registry namespace and login user. |
-| `extra-registry` | `dhi.io` | Second registry to log in to with the same credentials. Empty to skip. |
+| `registry` | `docker.io` | `docker.io` or `ghcr.io`. `ghcr.io` uses the job token and needs `packages: write`. |
+| `registry-username` | *(owner for ghcr.io, `vars.DOCKERHUB_USERNAME` otherwise)* | Registry namespace and login user. |
+| `extra-registry` | `dhi.io` | Registry for base image pulls, always logged in with the Docker account. Empty to skip. |
 | `timeout-minutes` | `30` | Job timeout. |
 
 ### Outputs
@@ -93,7 +112,7 @@ more than the calling job has.
 
 | Secret | Description |
 | --- | --- |
-| `DOCKERHUB_TOKEN` | Registry token, used for `registry` and `extra-registry`. |
+| `DOCKERHUB_TOKEN` | Optional. Registry password for `docker.io`, and always the credential for `extra-registry`. Not needed when publishing to `ghcr.io` with no `extra-registry`. |
 
 ### Pinned tools
 
@@ -104,9 +123,10 @@ already on `PATH`**, otherwise it logs that metadata is unavailable and installs
 unverified binary. That is why `Install Cosign` runs first; reordering the two steps
 silently drops the check.
 
-`cosign` is pinned to `v3.0.6` via the installer's `cosign-release` input. cosign 3.x
-writes a Sigstore bundle to the `sha256-<digest>` tag; 2.x wrote a classic simple-signing
-`sha256-<digest>.sig`. Which of the two an admission controller accepts is worth
+`cosign` is pinned via the installer's `cosign-release` input rather than left to its
+default. cosign 3.x writes the signature as an OCI referrer carrying the predicate
+`https://sigstore.dev/cosign/sign/v1`; 2.x wrote a classic simple-signing
+`sha256-<digest>.sig` tag. Which of the two an admission controller accepts is worth
 confirming against the cluster rather than inheriting from an installer default that can
 change. Dependabot does not track this input either.
 

@@ -161,7 +161,9 @@ installer's `cosign-release` input.
 
 ## 4. Kyverno is not verifying anything today
 
-**Status:** open. Independent of this repository.
+**Status:** open — and *not* independent of this repository after all. Same root cause as
+issue 7: the Docker Hub account has no pull budget left, so Kyverno's manifest fetches 429
+exactly as cosign's did.
 
 Every pod running a `theadzik/*` image reports `error`, not `pass`, in its PolicyReport:
 
@@ -208,38 +210,56 @@ its three callers run with `push: false`, so they cover the build and layout onl
 
 Repin to `v2.0.0` once issues 3 and 7 are closed.
 
-## 7. cosign authenticates non-deterministically on runners
+## 7. Docker Hub pull quota is permanently exhausted
 
-**Status:** open. The reason the pipeline works is not understood.
+**Status:** root cause found 2026-08-01. Was filed as "cosign authenticates
+non-deterministically"; that framing was wrong.
 
-Four runs, one command. `cosign sign` failed with Docker Hub's unauthenticated pull rate
-limit at 06:50, 07:07 and 16:41, then succeeded at 16:59 — with a **byte-identical
-invocation**. The diff between the rc it failed on and the rc it passed on touches nothing
-in the command; only diagnostics were added ahead of it.
+`cosign sign` failed with Docker Hub's unauthenticated pull rate limit at 06:50, 07:07 and
+16:41, succeeded at 16:59, then failed again at 17:23 — with a byte-identical invocation
+throughout. Chasing that as an authentication fault cost most of a day and produced four
+release candidates. It was not an authentication fault.
 
-Everything the credentials could be blamed for has been excluded. In the successful run the
-minted token was demonstrably authenticated:
+The probe in blog's `cosign-auth-probe.yaml` tests each credential mechanism against an
+already-published digest, reading the account's pull quota either side of every attempt:
 
 ```text
-HTTP/2 200
-docker-ratelimit-source: theadzik      # the account, not an IP
-x-ratelimit-limit: 200;w=3600
-x-ratelimit-remaining: 150;w=3600
+mechanism        result   account pull quota
+ambient-login    exit=1   quota     0 -> 0     saw: TOOMANYREQUESTS
+written-config   exit=1   quota     0 -> 0     saw: TOOMANYREQUESTS
+user-password    exit=1   quota     0 -> 0     saw: TOOMANYREQUESTS
+registry-token   exit=1   quota     0 -> 0     saw: TOOMANYREQUESTS
 ```
 
-The most economical explanation is that cosign's manifest read is anonymous in all four
-runs, and Docker Hub's anonymous limit is per-IP (100 per 6h, shared by everything on that
-GitHub runner address). Three runs landed on an exhausted address, one did not. If that is
-right the pipeline is a lottery rather than fixed, and it will fail again.
+Zero remaining, on a reading taken with a token minted from the account's own credentials.
+Re-run eleven hours later on a one-hour window: still zero. The account is not spiking over
+its limit, it is pinned at it.
 
-**The measurement, added in rc.5.** Each rate-limit reading is itself one authenticated
-pull, so reading either side of `cosign sign` brackets what cosign spends:
+**What consumes it.** The budget is 200 pulls per hour. ArgoCD Image Updater reconciles 20
+images every ~2 minutes; Kyverno re-verifies every `theadzik/*` pod, pulling manifests and
+referrer bundles, and retries when those 429; CI builds add a handful each. Kyverno's
+retries make it self-reinforcing.
 
-- `before - after - 1 == 0` → cosign's reads never touched the account: it is anonymous,
-  and the passing run was luck.
-- `before - after - 1 >= 1` → cosign used the token and the flow is genuinely authenticated.
+**Why it was so hard to see.** Docker Hub reports the failure as *"You have reached your
+unauthenticated pull rate limit"* regardless, which reads as an authentication problem. Two
+further facts kept the wrong theory alive: an authenticated `regctl manifest head` had
+succeeded seconds earlier in the same job, and every credential mechanism demonstrably
+works when tested locally.
 
-rc.5 also supplies credentials three ways at once — an isolated `DOCKER_CONFIG` for the
-keychain, `--registry-token`, and the username and password the token was minted from — so
-that no code path inside cosign can end up anonymous. The measurement reports which of
-those it actually used.
+**The fix.** Migrate images to ghcr.io, which has no pull rate limits for public images.
+Implemented in the build workflow first; cluster secrets and ArgoCD follow. Reducing the
+pollers would buy margin against the same ceiling rather than removing it.
+
+## 8. Reusable workflow permissions, for the record
+
+**Status:** settled 2026-08-01 by experiment, since the documentation does not state it.
+
+| Called workflow | Caller grants | Result |
+| --- | --- | --- |
+| omits `permissions` | `packages: write` | inherits it — the job token shows `Packages: write` |
+| declares `packages: write` | only `contents: read` | `startup_failure` |
+
+So a called workflow that declares permissions *replaces* what it would inherit, and
+cannot ask for more than the caller holds. `build-and-push.yaml` therefore declares none:
+that is what lets one workflow serve a Docker Hub caller and a GHCR caller, since only the
+latter needs `packages: write`.
