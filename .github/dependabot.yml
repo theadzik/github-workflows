@@ -9,8 +9,28 @@ updates:
     schedule:
       interval: "weekly"
     cooldown:
-      default-days: 2
+      default-days: 7
     groups:
+      # Majors stay out of the batch deliberately. A breaking change in an
+      # action that builds, scans or signs every image needs to be reviewable
+      # and revertable on its own, not merged alongside six routine bumps.
       github-actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # The hooks are this repository's only tests: nothing here runs, so actionlint
+  # and zizmor are what stands between a bad edit and every caller's build.
+  - package-ecosystem: "pre-commit"
+    directories:
+      - "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      pre-commit:
         patterns:
           - "*"
