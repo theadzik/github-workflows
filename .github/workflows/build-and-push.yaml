@@ -219,17 +219,9 @@ jobs:
         with:
           cosign-release: v3.1.2
 
-      # Needed because nothing already on the runner can push a prebuilt layout
-      # to a digest: `docker buildx imagetools create` refuses to run without
-      # --tag, and skopeo rejects a digest destination outright.
-      #
-      # The installer carries the SHA256 of each official release and fails on a
-      # mismatch, so pinning it by commit pins the binary too.
       - name: Install oras
         if: inputs.push
         uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
-        with:
-          version: 1.3.3
 
       # Pushed at its digest with no tag written, so ArgoCD Image Updater - which
       # discovers images by listing tags - cannot see it until the tags go up
@@ -294,21 +286,27 @@ jobs:
           subject-digest: ${{ steps.layout.outputs.digest }}
           push-to-registry: true
 
-      # Fails the job before any tag exists if the signature the cluster will
-      # demand is not the one this workflow just wrote. The identity pattern
-      # mirrors the subjectRegExp in the homelab ImageValidatingPolicy, so a
-      # signature that would be rejected at admission is rejected here instead,
-      # where it is a red check rather than a stuck rollout.
+      # Fails the job before any tag exists if the signature is not the one this
+      # workflow just wrote.
+      #
+      # The identity is this file: keyless signing puts the called workflow's
+      # job_workflow_ref in the certificate SAN, so it names this repository and
+      # this path regardless of which caller triggered the build. Only the ref
+      # after @ varies, since callers pin different commits. Renaming or moving
+      # this workflow changes the identity and must be reflected here.
       - name: Verify signature
         if: inputs.push
         env:
           DIGEST: ${{ steps.layout.outputs.digest }}
-          OWNER: ${{ github.repository_owner }}
+          # Dots are escaped because this is a regexp and an unescaped one would
+          # also match a lookalike host or path. Only the ref after @ is open,
+          # since callers pin different commits of this file.
+          SIGNER_IDENTITY: '^https://github\.com/theadzik/github-workflows/\.github/workflows/build-and-push\.yaml@.+$'
         run: |-
           set -euo pipefail
           cosign verify \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --certificate-identity-regexp "^https://github\.com/${OWNER}/.+/\.github/workflows/.+@.+$" \
+            --certificate-identity-regexp "${SIGNER_IDENTITY}" \
             "${IMAGE_REF}@${DIGEST}" > /dev/null
           echo "Signature verified for ${IMAGE_REF}@${DIGEST}"
 

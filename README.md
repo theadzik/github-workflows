@@ -34,8 +34,19 @@ the digest is unchanged and the referrers attached to it stay findable.
 **Signed, not just attested.** `actions/attest` produces signed statements *about* the
 image; `cosign sign` produces a signature *on* it, which is what Kyverno's
 `verifyImageSignatures` looks for. Both use the same keyless workflow identity. The
-signature is verified with `cosign verify` before any tag is published, so an identity
-the cluster would refuse fails the build instead of the rollout.
+signature is verified before any tag is published, so an identity the cluster would refuse
+fails the build instead of the rollout.
+
+That verification names one signer and nothing else:
+
+```text
+^https://github\.com/theadzik/github-workflows/\.github/workflows/build-and-push\.yaml@.+$
+```
+
+Keyless signing puts the *called* workflow's `job_workflow_ref` in the certificate, so the
+identity is this file regardless of which repository triggered the build. Only the ref
+after `@` is open, because callers pin different commits. Renaming or moving this workflow
+changes the identity and this pattern with it.
 
 ### Usage
 
