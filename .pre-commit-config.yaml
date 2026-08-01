@@ -1,0 +1,62 @@
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+      - id: detect-private-key
+
+  # The whole repository is one reusable workflow, so the workflow linters are
+  # the point rather than a side check. actionlint runs shellcheck over every
+  # `run:` block, which is where the digest handling, the SBOM check and the tag
+  # loop live.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+
+  # actionlint judges whether the workflow is correct; zizmor judges whether it
+  # is safe - template injection, credentials persisted into the workspace,
+  # over-broad permissions. This workflow holds a caller's registry credential
+  # and signs what it builds, so that second question is the one that matters
+  # here. Offline by default; the audits needing a GitHub token are skipped.
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.28.0
+    hooks:
+      - id: zizmor
+
+  # Checks GitHub will otherwise only report by rejecting a push or silently
+  # ignoring a mistyped key.
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: 0.37.4
+    hooks:
+      - id: check-github-workflows
+      - id: check-dependabot
+
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.49.1
+    hooks:
+      - id: markdownlint
+        args: ["--fix"]
+
+  # Callers hand this workflow registry credentials. Push protection is
+  # server-side and only fires once a commit is on its way out; this catches a
+  # secret locally, before it exists in history at all.
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args:
+          - "--baseline"
+          - ".sec.baseline"

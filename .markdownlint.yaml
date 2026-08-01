@@ -1,0 +1,5 @@
+# Markdownlint configuration
+# See https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
+
+# MD013 - Line length - disabled for blog content
+MD013: false
