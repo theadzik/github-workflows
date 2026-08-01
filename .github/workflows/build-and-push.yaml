@@ -288,9 +288,19 @@ jobs:
       # for such a document. Verified both ways before choosing.
       - name: Generate SBOM from the layout
         if: inputs.push
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
         run: |-
           set -euo pipefail
-          syft "oci-dir:${RUNNER_TEMP}/layout" -o cyclonedx-json=sbom.cdx.json
+          # syft defaults to linux/amd64 and hard-fails on a layout that does not
+          # contain it ("unexpected number of images matching platform
+          # linux/amd64 ... expected 1, found 0"). Naming the platform makes a
+          # single-arch arm64 build work, and makes the multi-platform case
+          # describe the first entry rather than whichever syft would pick.
+          # Trivy does not need this; it resolves the layout's own platform.
+          primary="${PLATFORMS%%,*}"
+          primary="${primary//[[:space:]]/}"
+          syft "oci-dir:${RUNNER_TEMP}/layout" --platform "${primary}" -o cyclonedx-json=sbom.cdx.json
 
           # An SBOM that failed to identify the OS is the failure mode this
           # whole format choice exists to avoid, so fail loudly rather than
