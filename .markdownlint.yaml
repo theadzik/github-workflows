@@ -1,5 +1,6 @@
 # Markdownlint configuration
 # See https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
 
-# MD013 - Line length - disabled for blog content
+# MD013 - Line length. The README wraps prose at 90, and its input, output and
+# secret tables run wider than that on their own.
 MD013: false
