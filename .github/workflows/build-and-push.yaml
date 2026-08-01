@@ -120,7 +120,7 @@ jobs:
         env:
           PLATFORMS: ${{ inputs.platforms }}
         run: |-
-          echo "::warning title=Scan coverage::${PLATFORMS} produces a multi-platform index. Trivy scans one platform; the others are signed unscanned."
+          echo "::warning title=Scan coverage::${PLATFORMS} produces a multi-platform index. Trivy scans and syft inventories one platform; the others are signed unscanned and undescribed."
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -165,8 +165,14 @@ jobs:
       # deployed. The same exporter serves both paths: a build-only run simply
       # never pushes what it built.
       #
-      # The layout already contains the SBOM and provenance attestation
-      # manifests, so the push below carries them rather than regenerating them.
+      # `sbom` is deliberately not set. BuildKit's SBOM pipeline is SPDX-only
+      # (frontend/attestations/sbom/sbom.go hardcodes the SPDX predicate), and
+      # syft's SPDX writer emits no OPERATING-SYSTEM package, which Trivy's SPDX
+      # parser requires to establish distro context. The result reads as a clean
+      # scan rather than an error: measured against ghcr.io/theadzik images,
+      # `trivy sbom` returned zero OS packages where `trivy image` found twelve.
+      # The SBOM is generated from the same layout by syft below, as CycloneDX,
+      # which both Trivy and Grype read correctly.
       - name: Build to OCI layout
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -179,7 +185,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: ${{ inputs.push && 'mode=max' || 'false' }}
-          sbom: ${{ inputs.push }}
           build-args: |
             ${{ inputs.build-args }}
 
@@ -223,6 +228,10 @@ jobs:
         if: inputs.push
         uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
 
+      - name: Install syft
+        if: inputs.push
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+
       # Pushed at its digest with no tag written, so ArgoCD Image Updater - which
       # discovers images by listing tags - cannot see it until the tags go up
       # last, after the signature and attestations exist. oras reuses the
@@ -261,21 +270,40 @@ jobs:
           DIGEST: ${{ steps.layout.outputs.digest }}
         run: cosign sign --yes "${IMAGE_REF}@${DIGEST}"
 
-      - name: Extract buildx-generated SBOM
-        id: sbom-extract
+      # Inventories the same on-disk layout that Trivy scanned and oras pushed,
+      # so the bytes described are the bytes signed and deployed - no registry
+      # round-trip, and no second build to disagree with the first.
+      #
+      # CycloneDX rather than SPDX: syft's CycloneDX writer declares the OS as an
+      # `operating-system` component, which is what lets a reader map apk purls
+      # to a distro. Its SPDX writer does not, and Trivy silently reports nothing
+      # for such a document. Verified both ways before choosing.
+      - name: Generate SBOM from the layout
         if: inputs.push
-        run: |
-          docker buildx imagetools inspect \
-            ${{ env.IMAGE_REF }}@${{ steps.layout.outputs.digest }} \
-            --format '{{ json .SBOM.SPDX }}' > sbom.spdx.json
+        run: |-
+          set -euo pipefail
+          syft "oci-dir:${RUNNER_TEMP}/layout" -o cyclonedx-json=sbom.cdx.json
 
+          # An SBOM that failed to identify the OS is the failure mode this
+          # whole format choice exists to avoid, so fail loudly rather than
+          # attest a document that reads as an empty scan.
+          os=$(jq -r '[.components[]? | select(.type=="operating-system") | .name] | join(",")' sbom.cdx.json)
+          if [[ -z "${os}" ]]; then
+            echo "::error title=SBOM::no operating-system component; readers cannot match OS packages"
+            exit 1
+          fi
+          echo "SBOM: $(jq '.components|length' sbom.cdx.json) components, OS ${os}"
+
+      # actions/attest sniffs the document and sets the predicate type itself:
+      # https://cyclonedx.org/bom for CycloneDX, with no version suffix. The
+      # Kyverno policy in homelab matches on exactly that string.
       - name: Attest SBOM
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         if: inputs.push
         with:
           subject-name: ${{ env.IMAGE_REF }}
           subject-digest: ${{ steps.layout.outputs.digest }}
-          sbom-path: sbom.spdx.json
+          sbom-path: sbom.cdx.json
           push-to-registry: true
 
       - name: Attest Provenance
