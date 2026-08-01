@@ -228,9 +228,17 @@ jobs:
         if: inputs.push
         uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
 
+      # syft is pinned independently of the action that installs it. The action
+      # defaults to v1.42.3, which cannot read the layout this workflow builds:
+      # `provenance: mode=max` makes the layout root an image *index* rather than
+      # a manifest, and 1.42.3 rejects it with "unexpected media type ...
+      # image.index.v1+json". 1.50.0 reads it. Bump this deliberately, and only
+      # after checking the new version still parses a layout with attestations.
       - name: Install syft
         if: inputs.push
         uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: v1.50.0
 
       # Pushed at its digest with no tag written, so ArgoCD Image Updater - which
       # discovers images by listing tags - cannot see it until the tags go up
