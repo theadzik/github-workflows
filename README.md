@@ -116,12 +116,11 @@ rather than a provider.
 
 ### Pinned tools
 
-`regctl` is installed with `regclient/actions/regctl-installer`, pinned by SHA and asked
-for a specific `release`. That installer verifies the downloaded binary with
-`cosign verify-blob` against regclient's release identity — **but only if cosign is
-already on `PATH`**, otherwise it logs that metadata is unavailable and installs an
-unverified binary. That is why `Install Cosign` runs first; reordering the two steps
-silently drops the check.
+`oras` pushes the built layout to a digest, which nothing already on the runner can do:
+`docker buildx imagetools create` refuses to run without `--tag`, and skopeo rejects a
+digest destination outright. It is installed with `oras-project/setup-oras`, pinned by
+SHA and asked for a specific `version`. That action carries the SHA256 of each official
+release and fails on a mismatch, so pinning the action by commit pins the binary as well.
 
 `cosign` is pinned via the installer's `cosign-release` input rather than left to its
 default. cosign 3.x writes the signature as an OCI referrer carrying the predicate
