@@ -148,7 +148,7 @@ pull request when a new tag is released here.
 
 | Tag | Shape |
 | --- | --- |
-| `v2` | Builds to an OCI layout, scans it on disk, then pushes by digest with `regctl`. Nothing unscanned reaches the registry. Registry, credentials and namespace all come from the caller. |
+| `v2` | Builds to an OCI layout, scans it on disk, then pushes by digest with `oras`. Nothing unscanned reaches the registry. Registry, credentials and namespace all come from the caller. |
 | `v1` | Builds straight into the registry (`push-by-digest`), then scans the pushed digest. Docker Hub assumed throughout. |
 
 `v1` to `v2` is not a pin change. Callers must add `packages: write`, pass `registry` and
