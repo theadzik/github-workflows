@@ -1,13 +1,20 @@
 name: Build and Push Docker Image
 
-# Shared reusable workflow. Callers:
-#   uses: theadzik/github-workflows/.github/workflows/build-and-push.yaml@<sha>
-#   secrets: inherit   # supplies DOCKERHUB_TOKEN, when docker.io is involved
+# Shared reusable workflow. The caller owns every registry detail: where to
+# publish, who to authenticate as, and which credential to use.
 on:
   workflow_call:
     inputs:
+      registry:
+        description: "Registry host to publish to."
+        required: true
+        type: string
       image-name:
-        description: "Image repository name, appended to <registry>/<username>/."
+        description: "Repository path under the registry, namespace included. For example theadzik/zmuda-pro-blog."
+        required: true
+        type: string
+      registry-username:
+        description: "User to authenticate to the registry as."
         required: true
         type: string
       context-path:
@@ -54,51 +61,44 @@ on:
         required: false
         type: string
         default: "HIGH,CRITICAL"
-      registry:
-        description: "docker.io or ghcr.io. ghcr.io authenticates with the job's GITHUB_TOKEN and needs packages: write on the calling job."
-        required: false
-        type: string
-        default: "docker.io"
-      registry-username:
-        description: "Defaults to github.actor for ghcr.io, or the caller repository's DOCKERHUB_USERNAME variable."
+      extra-registry:
+        description: "Further registry to log in to, for base image pulls. Nothing is published there. Empty to skip."
         required: false
         type: string
         default: ""
-      extra-registry:
-        description: "Second registry to authenticate against with the same credentials. Empty to skip."
+      extra-registry-username:
+        description: "User to authenticate to extra-registry as."
         required: false
         type: string
-        default: "dhi.io"
+        default: ""
       timeout-minutes:
         required: false
         type: number
         default: 30
     secrets:
-      DOCKERHUB_TOKEN:
-        description: "Registry password for docker.io. Not needed when pushing to ghcr.io."
+      REGISTRY_PASSWORD:
+        description: "Password or token for registry-username."
+        required: true
+      EXTRA_REGISTRY_PASSWORD:
+        description: "Password or token for extra-registry-username."
         required: false
     outputs:
       digest:
         description: "Digest of the image that was scanned, signed and tagged."
         value: ${{ jobs.build-push-sign.outputs.digest }}
       image-ref:
-        description: "Image reference without a tag, for example docker.io/user/name."
+        description: "Image reference without a tag."
         value: ${{ jobs.build-push-sign.outputs.image-ref }}
 
 env:
-  REGISTRY: ${{ inputs.registry }}
-  # ghcr.io namespaces by GitHub owner and authenticates with the job token;
-  # docker.io uses the account behind DOCKERHUB_TOKEN.
-  REPOSITORY: ${{ inputs.registry-username != '' && inputs.registry-username || (inputs.registry == 'ghcr.io' && github.repository_owner || vars.DOCKERHUB_USERNAME) }}
-  REGISTRY_PASSWORD: ${{ inputs.registry == 'ghcr.io' && github.token || secrets.DOCKERHUB_TOKEN }}
-  IMAGE_NAME: ${{ inputs.image-name }}
-  # The secrets context is unavailable in a step `if`, so resolve it here.
-  HAS_DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+  IMAGE_REF: ${{ inputs.registry }}/${{ inputs.image-name }}
 
 jobs:
   build-push-sign:
-    # Callers must grant at least this set. A called workflow cannot hold more
+    # Callers must grant at least this set: a called workflow cannot hold more
     # than its caller, and asking for more fails the run at startup.
+    # packages: write is what a registry authenticating with the job token
+    # needs; it is inert for any other registry.
     permissions:
       contents: read
       id-token: write
@@ -109,7 +109,7 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     outputs:
       digest: ${{ steps.layout.outputs.digest }}
-      image-ref: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
+      image-ref: ${{ env.IMAGE_REF }}
     steps:
       # Trivy scans one platform out of a multi-platform index, so the platforms
       # beyond the first are signed without having been scanned. Accepted
@@ -139,27 +139,26 @@ jobs:
       - name: Login to registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ env.REPOSITORY }}
-          password: ${{ env.REGISTRY_PASSWORD }}
+          registry: ${{ inputs.registry }}
+          username: ${{ inputs.registry-username }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
 
-      # Separate credentials from the push registry: dhi.io is where base images
-      # come from and is backed by the Docker account, whether or not this build
-      # publishes to Docker Hub. It issues no anonymous pull tokens at all, so
-      # this runs on build-only pull requests too.
+      # Pull-only, and its credentials are separate from the publishing
+      # registry's. Runs on build-only pull requests too, since base images are
+      # needed whether or not anything is published.
       - name: Login to extra registry
-        if: inputs.extra-registry != '' && env.HAS_DOCKERHUB_TOKEN == 'true'
+        if: inputs.extra-registry != ''
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ inputs.extra-registry }}
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ inputs.extra-registry-username }}
+          password: ${{ secrets.EXTRA_REGISTRY_PASSWORD }}
 
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.IMAGE_REF }}
           tags: ${{ inputs.tags }}
 
       # One build, one artifact, exported to an OCI layout on disk rather than
@@ -177,7 +176,7 @@ jobs:
         with:
           context: ${{ inputs.context-path }}
           platforms: ${{ inputs.platforms }}
-          outputs: type=oci,tar=false,dest=${{ runner.temp }}/layout,name=${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
+          outputs: type=oci,tar=false,dest=${{ runner.temp }}/layout,name=${{ env.IMAGE_REF }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
           cache-from: type=gha
@@ -247,7 +246,6 @@ jobs:
       - name: Push layout by digest
         if: inputs.push
         env:
-          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
           DIGEST: ${{ steps.layout.outputs.digest }}
         run: |-
           set -euo pipefail
@@ -272,7 +270,6 @@ jobs:
       - name: Sign image
         if: inputs.push
         env:
-          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
           DIGEST: ${{ steps.layout.outputs.digest }}
         run: cosign sign --yes "${IMAGE_REF}@${DIGEST}"
 
@@ -281,14 +278,14 @@ jobs:
         if: inputs.push
         run: |
           docker buildx imagetools inspect \
-            ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}@${{ steps.layout.outputs.digest }} \
+            ${{ env.IMAGE_REF }}@${{ steps.layout.outputs.digest }} \
             --format '{{ json .SBOM.SPDX }}' > sbom.spdx.json
 
       - name: Attest SBOM
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         if: inputs.push
         with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
+          subject-name: ${{ env.IMAGE_REF }}
           subject-digest: ${{ steps.layout.outputs.digest }}
           sbom-path: sbom.spdx.json
           push-to-registry: true
@@ -297,7 +294,7 @@ jobs:
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         if: inputs.push
         with:
-          subject-name: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
+          subject-name: ${{ env.IMAGE_REF }}
           subject-digest: ${{ steps.layout.outputs.digest }}
           push-to-registry: true
 
@@ -309,7 +306,6 @@ jobs:
       - name: Verify signature
         if: inputs.push
         env:
-          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
           DIGEST: ${{ steps.layout.outputs.digest }}
           OWNER: ${{ github.repository_owner }}
         run: |-
@@ -322,15 +318,12 @@ jobs:
 
       # Only now does the image become discoverable, with its signature and
       # attestations already in place. `imagetools create` re-pushes the same
-      # manifest under
-      # each tag rather than wrapping it in a new index, so the digest is
-      # unchanged and the attestations - attached to that digest - stay
-      # findable. Verified against a scratch registry.
+      # manifest under each tag rather than wrapping it in a new index, so the
+      # digest is unchanged and the referrers attached to it stay findable.
       - name: Publish tags
         if: inputs.push
         env:
           METADATA_JSON: ${{ steps.meta.outputs.json }}
-          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}
           DIGEST: ${{ steps.layout.outputs.digest }}
         run: |-
           set -euo pipefail

@@ -39,7 +39,8 @@ the cluster would refuse fails the build instead of the rollout.
 
 ### Usage
 
-Publishing to **ghcr.io** — no registry secret needed, the job token does it:
+The caller owns every registry detail — where to publish, who to authenticate as, and with
+which credential. This workflow has no knowledge of any particular registry.
 
 ```yaml
 jobs:
@@ -50,43 +51,40 @@ jobs:
       id-token: write
       attestations: write
       artifact-metadata: write
-      packages: write          # ghcr.io only
+      packages: write
     with:
       registry: ghcr.io
-      image-name: my-image
+      image-name: theadzik/my-image
+      registry-username: ${{ github.actor }}
+      # Logged into for base image pulls only; nothing is published there.
+      extra-registry: dhi.io
+      extra-registry-username: ${{ vars.DOCKERHUB_USERNAME }}
       tags: |
         type=raw,value=main
         type=sha
       push: ${{ github.event_name != 'pull_request' }}
-    secrets: inherit
+    secrets:
+      REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      EXTRA_REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
 ```
 
-Publishing to **docker.io** is the same call without `packages: write` and without the
-`registry` input; it authenticates with the caller's `DOCKERHUB_TOKEN`, which
-`secrets: inherit` passes.
+`image-name` is the whole path under the registry, namespace included, so a registry that
+namespaces differently from its login user needs no special handling here.
 
-**The `permissions` block belongs to the caller, and it is not optional.** This workflow
-deliberately declares none of its own, because a called workflow that declares permissions
-*replaces* what it inherits rather than adding to it — and one that asks for more than the
-caller granted fails the run at startup. Both were verified rather than assumed. Omitting
-the block here is what lets a Docker Hub caller and a GHCR caller share one workflow.
+**The `permissions` block belongs to the caller, and it is not optional.** A called
+workflow cannot hold more than its caller, and one asking for more fails the run at
+startup — both verified rather than assumed. `packages: write` is what a registry
+authenticating with the job token needs; it is inert for any other registry, so the block
+above is the same everywhere.
 
-| | `docker.io` | `ghcr.io` |
-| --- | --- | --- |
-| Namespace | `vars.DOCKERHUB_USERNAME` | the GitHub owner |
-| Credential | `secrets.DOCKERHUB_TOKEN` | the job's `GITHUB_TOKEN` |
-| Extra permission | none | `packages: write` |
-| Pull rate limits | 200/hour per account | none for public images |
-
-`dhi.io` (or whatever `extra-registry` names) is logged in with the Docker account
-regardless of where the build publishes, since that is where base images come from. That
-login is skipped when no `DOCKERHUB_TOKEN` is available.
+Secrets are mapped explicitly rather than inherited, since the names here describe a role
+rather than a provider.
 
 ### Inputs
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `image-name` | *required* | Image repository name, appended to `<registry>/<username>/`. |
+| `image-name` | *required* | Repository path under the registry, namespace included. |
 | `context-path` | `.` | Docker build context. |
 | `git-ref` | *(triggering ref)* | Ref to check out. |
 | `fetch-depth` | `1` | Checkout depth. Use `0` when the build reads `.git`. |
@@ -96,9 +94,10 @@ login is skipped when no `DOCKERHUB_TOKEN` is available.
 | `push` | `true` | `false` builds and scans only, for pull requests. |
 | `scan` | `true` | Fail on fixable findings before anything is pushed. |
 | `scan-severity` | `HIGH,CRITICAL` | Trivy severities that fail the build. |
-| `registry` | `docker.io` | `docker.io` or `ghcr.io`. `ghcr.io` uses the job token and needs `packages: write`. |
-| `registry-username` | *(owner for ghcr.io, `vars.DOCKERHUB_USERNAME` otherwise)* | Registry namespace and login user. |
-| `extra-registry` | `dhi.io` | Registry for base image pulls, always logged in with the Docker account. Empty to skip. |
+| `registry` | *required* | Registry host to publish to. |
+| `registry-username` | *required* | User to authenticate to the registry as. |
+| `extra-registry` | *(none)* | Further registry to log in to, for base image pulls. Nothing is published there. |
+| `extra-registry-username` | *(none)* | User to authenticate to `extra-registry` as. |
 | `timeout-minutes` | `30` | Job timeout. |
 
 ### Outputs
@@ -112,7 +111,8 @@ login is skipped when no `DOCKERHUB_TOKEN` is available.
 
 | Secret | Description |
 | --- | --- |
-| `DOCKERHUB_TOKEN` | Optional. Registry password for `docker.io`, and always the credential for `extra-registry`. Not needed when publishing to `ghcr.io` with no `extra-registry`. |
+| `REGISTRY_PASSWORD` | *required* — password or token for `registry-username`. |
+| `EXTRA_REGISTRY_PASSWORD` | Password or token for `extra-registry-username`. |
 
 ### Pinned tools
 
@@ -138,8 +138,9 @@ pull request when a new tag is released here.
 
 | Tag | Shape |
 | --- | --- |
-| `v2` | Builds to an OCI layout, scans it on disk, then pushes by digest with `regctl`. Nothing unscanned reaches the registry. Multi-platform allowed with single-platform scan coverage. |
-| `v1` | Builds straight into the registry (`push-by-digest`), then scans the pushed digest. Multi-platform rejected. |
+| `v2` | Builds to an OCI layout, scans it on disk, then pushes by digest with `regctl`. Nothing unscanned reaches the registry. Registry, credentials and namespace all come from the caller. |
+| `v1` | Builds straight into the registry (`push-by-digest`), then scans the pushed digest. Docker Hub assumed throughout. |
 
-Inputs and outputs are identical between the two, so moving from `v1` to `v2` is a pin
-change only.
+`v1` to `v2` is not a pin change. Callers must add `packages: write`, pass `registry` and
+`registry-username`, map `REGISTRY_PASSWORD` instead of inheriting `DOCKERHUB_TOKEN`, and
+move the namespace from the username into `image-name`.
