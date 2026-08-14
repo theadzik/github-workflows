@@ -215,6 +215,36 @@ jobs:
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           echo "Built ${digest}"
 
+      # Trivy reads `trivy.yaml` from the working directory unless it is told
+      # otherwise, and the working directory here is the *caller's* checked-out
+      # repository. A caller could therefore reconfigure the scan that gates
+      # their own publish, without touching this workflow or its inputs: a
+      # `trivy.yaml` carrying `scan.skip-dirs` for the path holding the
+      # vulnerable package turns a blocked build into a passing one. Measured
+      # against this repository's own fixture rather than supposed.
+      #
+      # Writing the file here and naming it takes that away. Trivy loads this
+      # one instead of anything in the workspace, so every setting the scan step
+      # does not pass as an input comes from this repository and nowhere else.
+      # It is written rather than committed because a called workflow's own
+      # repository is never checked out - only the caller's is.
+      #
+      # These settings are the weakest layer: the action's documented order is
+      # input, then environment variable, then config file, then default, so
+      # anything the scan step passes below still wins.
+      - name: Write the Trivy configuration
+        if: inputs.scan
+        run: |-
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/trivy.yaml" <<'EOF'
+          scan:
+            # Trivy's own default today, pinned so that a release which flips it
+            # cannot start reprinting accepted findings in every caller's log.
+            show-suppressed: false
+          EOF
+          echo "Trivy configuration for this run:"
+          cat "${RUNNER_TEMP}/trivy.yaml"
+
       # Scans the layout on disk, before anything is pushed, so a finding keeps
       # the image out of the registry.
       #
@@ -229,6 +259,9 @@ jobs:
         if: inputs.scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: v0.74.0
+          hide-progress: true
+          trivy-config: ${{ runner.temp }}/trivy.yaml
           input: ${{ runner.temp }}/layout
           severity: ${{ inputs.scan-severity }}
           ignore-unfixed: true

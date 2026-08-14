@@ -18,6 +18,14 @@ build → OCI layout on disk → Trivy → push by digest (no tag)
 Trivy scans the layout in place. A finding fails the job before a single byte is pushed.
 The same exporter serves pull requests, which simply never push what they built.
 
+**The scan configures itself.** Trivy reads `trivy.yaml` from the working directory unless
+it is told otherwise, and that directory is the caller's checked-out repository — so a
+`trivy.yaml` there would reconfigure the scan gating that caller's own publish, no input
+required. `scan.skip-dirs` over the path holding a vulnerable package is enough to turn a
+blocked build into a passing one. This workflow writes its own configuration and names it,
+so Trivy loads that instead, and what the caller can influence is the set of inputs below
+and nothing else. Callers who need an acceptance have `trivyignores`, which records one.
+
 **One artifact all the way through.** The digest comes from the layout's `index.json` —
 the digest that will exist in the registry, byte for byte. The scan, the push, the
 signature and both attestations all reference it. Nothing is rebuilt or re-exported in
