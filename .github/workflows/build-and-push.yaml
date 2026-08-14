@@ -61,6 +61,23 @@ on:
         required: false
         type: string
         default: "HIGH,CRITICAL"
+      trivyignores:
+        description: |
+          Repo-relative path to a Trivy ignore file, suppressing findings the
+          caller has accepted. One .trivyignore.yaml, or a comma-separated list
+          of plain .trivyignore files - the action refuses to mix the two, and
+          refuses more than one of the YAML form.
+
+          Prefer the YAML form: it carries `expired_at`, so an acceptance stops
+          applying on a date instead of outliving the reason for it, and
+          `statement`, so the reason is recorded next to what it excuses.
+
+          The path resolves against the checked-out caller repository, at the
+          same ref this build uses, and a path that does not exist fails the
+          step rather than scanning unfiltered.
+        required: false
+        type: string
+        default: ""
       extra-registry:
         description: "Further registry to log in to, for base image pulls. Nothing is published there. Empty to skip."
         required: false
@@ -205,6 +222,9 @@ jobs:
       # file. Do not add `image-ref`: the action runs `trivy image .` with the
       # target passed as TRIVY_INPUT, and `image-ref` replaces that dot, leaving
       # two competing targets.
+      #
+      # The action echoes the ignore file into the log before scanning, so a run
+      # that passed always shows which acceptances were in force when it did.
       - name: Scan image for vulnerabilities
         if: inputs.scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -214,6 +234,7 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           format: table
+          trivyignores: ${{ inputs.trivyignores }}
 
       # The version is pinned because 3.x and 2.x write the signature in
       # different places, and which one Kyverno accepts should not change under
