@@ -1,0 +1,532 @@
+name: Test build-and-push
+
+# Exercises every path through build-and-push.yaml on the pull request that
+# changes it, by calling it the way a caller does. `uses: ./` resolves to the
+# copy on the pull request's own merge ref, so what runs here is the change
+# under review rather than what is already on main.
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/build-and-push.yaml"
+      - ".github/workflows/test-build-and-push.yaml"
+      - "tests/**"
+  # Dependabot's pull requests get a read-only token and no OIDC, so the
+  # scenarios below are skipped there - which is exactly when an action bump
+  # most wants testing. Re-run this by hand against the dependabot branch.
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  # One place to decide whether the calling scenarios can run at all, and one
+  # place to name the throwaway image they publish to. `needs` is the only
+  # context a called workflow's `with:` can read besides `github`, so constants
+  # that would otherwise be repeated eight times live here.
+  gate:
+    name: Decide what can run
+    runs-on: ubuntu-latest
+    outputs:
+      # A called workflow cannot hold more permission than its caller, and this
+      # one needs `id-token: write` for keyless signing even when it is only
+      # building. A fork's pull request cannot grant that, and neither can
+      # dependabot's, so those runs would fail at startup rather than report
+      # anything. They are skipped instead, and `result` says the run tested
+      # nothing rather than reporting a quiet green.
+      can-run: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') }}
+      image: theadzik/github-workflows-test
+      head-sha: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Report the decision
+        env:
+          CAN_RUN: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') }}
+        run: |-
+          set -euo pipefail
+          if [[ "${CAN_RUN}" == "true" ]]; then
+            echo "Calling scenarios will run." >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "### Calling scenarios skipped"
+              echo
+              echo "This event cannot grant \`id-token: write\`, which build-and-push.yaml"
+              echo "requires. Re-run this workflow manually against the branch to test it."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # The scenarios. Between them they cover every input, both values of every
+  # boolean, and every conditional step a passing run can reach.
+  #
+  # Every path here is one a green run proves. A job that calls a reusable
+  # workflow may not set `continue-on-error` - the schema rejects it - so a
+  # scenario that is supposed to fail can only ever report failure. The guards
+  # that fail a build are therefore not tested: see tests/README.md.
+  # ---------------------------------------------------------------------------
+
+  # Nothing but the required inputs: default tags, platform, scan, push, depth,
+  # and no ignore or extra registry. The whole publishing chain runs.
+  defaults:
+    name: Defaults, full publish
+    needs: gate
+    if: needs.gate.outputs.can-run == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      packages: write
+    uses: ./.github/workflows/build-and-push.yaml
+    with:
+      registry: ghcr.io
+      image-name: ${{ needs.gate.outputs.image }}
+      registry-username: ${{ github.actor }}
+      context-path: tests/fixtures/clean
+    secrets:
+      REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+  # What a caller's own pull request runs: build and scan, publish nothing. Also
+  # carries the two inputs that have no other home - a narrowed severity and a
+  # shortened timeout.
+  build-only:
+    name: push false, build and scan only
+    needs: gate
+    if: needs.gate.outputs.can-run == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      packages: write
+    uses: ./.github/workflows/build-and-push.yaml
+    with:
+      registry: ghcr.io
+      image-name: ${{ needs.gate.outputs.image }}
+      registry-username: ${{ github.actor }}
+      context-path: tests/fixtures/clean
+      push: false
+      scan-severity: "CRITICAL"
+      timeout-minutes: 15
+      tags: |
+        type=raw,value=never-published-${{ github.run_id }}
+        type=sha
+    secrets:
+      REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+  # Build args, several tags, an explicit ref and a full-history checkout, and a
+  # second registry logged into for base image pulls. The fixture's Dockerfile
+  # fails the build if the args do not arrive.
+  #
+  # The extra registry is ghcr.io again: the branch under test is the login
+  # step, not the host, and a second real registry would mean a second real
+  # credential for a test image nothing pulls.
+  every-optional-input:
+    name: Build args, tags, ref, extra registry
+    needs: gate
+    if: needs.gate.outputs.can-run == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      packages: write
+    uses: ./.github/workflows/build-and-push.yaml
+    with:
+      registry: ghcr.io
+      image-name: ${{ needs.gate.outputs.image }}
+      registry-username: ${{ github.actor }}
+      context-path: tests/fixtures/build-args
+      git-ref: ${{ needs.gate.outputs.head-sha }}
+      fetch-depth: 0
+      build-args: |
+        EXPECTED=passed-through
+        SECOND_ARG=also-passed
+      tags: |
+        type=raw,value=build-args-${{ github.run_id }}
+        type=raw,value=build-args-${{ github.run_id }}-second
+        type=sha
+      extra-registry: ghcr.io
+      extra-registry-username: ${{ github.actor }}
+    secrets:
+      REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      EXTRA_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+  # A single platform that is not the default, which is the case syft gets
+  # wrong when it is left to pick for itself.
+  arm64:
+    name: linux/arm64 only
+    needs: gate
+    if: needs.gate.outputs.can-run == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      packages: write
+    uses: ./.github/workflows/build-and-push.yaml
+    with:
+      registry: ghcr.io
+      image-name: ${{ needs.gate.outputs.image }}
+      registry-username: ${{ github.actor }}
+      context-path: tests/fixtures/cross
+      platforms: "linux/arm64"
+      tags: type=raw,value=arm64-${{ github.run_id }}
+    secrets:
+      REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+  # An index rather than a manifest: the coverage warning fires, syft describes
+  # the first platform only, and the tags are published against the index digest.
+  multi-platform:
+    name: Multi-platform index
+    needs: gate
+    if: needs.gate.outputs.can-run == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      packages: write
+    uses: ./.github/workflows/build-and-push.yaml
+    with:
+      registry: ghcr.io
+      image-name: ${{ needs.gate.outputs.image }}
+      registry-username: ${{ github.actor }}
+      context-path: tests/fixtures/cross
+      platforms: "linux/amd64,linux/arm64"
+      tags: type=raw,value=multiarch-${{ github.run_id }}
+    secrets:
+      REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+  # The vulnerable fixture, allowed through only because scanning is off. It is
+  # built and never pushed: `scan: false` is a path worth covering, not a way to
+  # put a known-vulnerable image in the registry.
+  scan-disabled:
+    name: scan false
+    needs: gate
+    if: needs.gate.outputs.can-run == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      packages: write
+    uses: ./.github/workflows/build-and-push.yaml
+    with:
+      registry: ghcr.io
+      image-name: ${{ needs.gate.outputs.image }}
+      registry-username: ${{ github.actor }}
+      context-path: tests/fixtures/vulnerable
+      scan: false
+      push: false
+    secrets:
+      REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+  # The YAML ignore form: one file, carrying a reason and an expiry.
+  trivyignore-yaml:
+    name: trivyignores, YAML form
+    needs: gate
+    if: needs.gate.outputs.can-run == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      packages: write
+    uses: ./.github/workflows/build-and-push.yaml
+    with:
+      registry: ghcr.io
+      image-name: ${{ needs.gate.outputs.image }}
+      registry-username: ${{ github.actor }}
+      context-path: tests/fixtures/vulnerable
+      scan-severity: "CRITICAL"
+      trivyignores: tests/trivyignore/accepted.trivyignore.yaml
+      push: false
+    secrets:
+      REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+  # The plain form, as a comma-separated list. The file that suppresses the
+  # finding is listed second on purpose.
+  trivyignore-plain:
+    name: trivyignores, plain form, two files
+    needs: gate
+    if: needs.gate.outputs.can-run == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      packages: write
+    uses: ./.github/workflows/build-and-push.yaml
+    with:
+      registry: ghcr.io
+      image-name: ${{ needs.gate.outputs.image }}
+      registry-username: ${{ github.actor }}
+      context-path: tests/fixtures/vulnerable
+      scan-severity: "CRITICAL"
+      trivyignores: tests/trivyignore/decoy.trivyignore,tests/trivyignore/accepted.trivyignore
+      push: false
+    secrets:
+      REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # What the publishing scenario actually left in the registry. The workflow
+  # verifies its own signature before tagging; this checks the same thing from
+  # outside, against the digest it reported, which is also the only test of its
+  # outputs.
+  # ---------------------------------------------------------------------------
+  published:
+    name: Verify what was published
+    needs: [gate, defaults]
+    if: needs.gate.outputs.can-run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Login to ghcr.io
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.2
+
+      - name: Install oras
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
+
+      - name: The outputs describe a real image
+        env:
+          DIGEST: ${{ needs.defaults.outputs.digest }}
+          IMAGE_REF: ${{ needs.defaults.outputs.image-ref }}
+          EXPECTED_REF: ghcr.io/${{ needs.gate.outputs.image }}
+        run: |-
+          set -euo pipefail
+          if [[ ! "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error title=Outputs::digest output is '${DIGEST}'"
+            exit 1
+          fi
+          if [[ "${IMAGE_REF}" != "${EXPECTED_REF}" ]]; then
+            echo "::error title=Outputs::image-ref output is '${IMAGE_REF}', expected '${EXPECTED_REF}'"
+            exit 1
+          fi
+          echo "Outputs: ${IMAGE_REF}@${DIGEST}"
+
+      - name: The image carries the signature the cluster expects
+        env:
+          DIGEST: ${{ needs.defaults.outputs.digest }}
+          IMAGE_REF: ${{ needs.defaults.outputs.image-ref }}
+          SIGNER_IDENTITY: '^https://github\.com/theadzik/github-workflows/\.github/workflows/build-and-push\.yaml@.+$'
+        run: |-
+          set -euo pipefail
+          cosign verify \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity-regexp "${SIGNER_IDENTITY}" \
+            "${IMAGE_REF}@${DIGEST}" > /dev/null
+          echo "Signature verified from outside the build."
+
+      - name: Both attestations are attached to that digest
+        env:
+          DIGEST: ${{ needs.defaults.outputs.digest }}
+          IMAGE_REF: ${{ needs.defaults.outputs.image-ref }}
+        run: |-
+          set -euo pipefail
+          oras discover --format json "${IMAGE_REF}@${DIGEST}" > referrers.json
+          # `referrers` since oras 1.2, `manifests` before it; the installer
+          # tracks the action's default version rather than a pin.
+          jq -r '(.referrers // .manifests // [])[] | "\(.artifactType)\t\(.digest)"' referrers.json
+          count=$(jq '(.referrers // .manifests // []) | length' referrers.json)
+          # One cosign signature and two sigstore bundles - the SBOM and the
+          # provenance that actions/attest pushed to the registry.
+          if [[ "${count}" -lt 3 ]]; then
+            echo "::error title=Referrers::expected at least 3 referrers, found ${count}"
+            exit 1
+          fi
+
+      - name: The published tag resolves to that digest
+        env:
+          DIGEST: ${{ needs.defaults.outputs.digest }}
+          IMAGE_REF: ${{ needs.defaults.outputs.image-ref }}
+        run: |-
+          set -euo pipefail
+          # `latest` because the publishing scenario takes the default tag spec.
+          # Concurrent runs on other branches would move it; the concurrency
+          # group only covers this one.
+          tagged=$(docker buildx imagetools inspect "${IMAGE_REF}:latest" --format '{{ .Manifest.Digest }}')
+          if [[ "${tagged}" != "${DIGEST}" ]]; then
+            echo "::error title=Tags::latest points at ${tagged}, the build reported ${DIGEST}"
+            exit 1
+          fi
+          echo "latest -> ${DIGEST}"
+
+  # The scenarios publish four throwaway images per run, and nothing reads them
+  # once `published` has had its look. They are deleted here rather than at pull
+  # request close: they are junk the moment the run ends, and a manually
+  # dispatched run has no close event to hang cleanup on.
+  #
+  # Runs even when a scenario failed - a build that failed after pushing still
+  # left tags behind.
+  cleanup:
+    name: Delete this run's images
+    needs: [gate, defaults, every-optional-input, arm64, multi-platform, published]
+    if: always() && needs.gate.outputs.can-run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      packages: write
+    steps:
+      - name: Delete the package versions this run created
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ needs.gate.outputs.image }}
+          RUN_ID: ${{ github.run_id }}
+        run: |-
+          set -euo pipefail
+
+          # Owner and package name are split out of the one string the scenarios
+          # published to, rather than spelled out again here. A second copy
+          # could drift from it, and this job deletes untagged versions older
+          # than six hours: aimed at the wrong package, that is somebody's
+          # signatures and attestations.
+          OWNER="${IMAGE%%/*}"
+          PACKAGE="${IMAGE#*/}"
+          if [[ "${OWNER}" == "${IMAGE}" || -z "${PACKAGE}" ]]; then
+            echo "::error title=Cleanup::cannot split '${IMAGE}' into an owner and a package name"
+            exit 1
+          fi
+          # ghcr allows a nested path, which the REST API takes as one encoded
+          # name while the registry API takes it as written.
+          PACKAGE_PATH="${PACKAGE//\//%2F}"
+
+          # gh prints the error body to stdout and exits non-zero, so a failure
+          # has to be caught here rather than fed to jq: iterating an error
+          # object yields its values, and the run would report "nothing to
+          # delete" for what is really a permission problem.
+          if ! versions=$(gh api --paginate "/users/${OWNER}/packages/container/${PACKAGE_PATH}/versions" 2>"${RUNNER_TEMP}/gh-error"); then
+            if grep -q '(HTTP 404)' "${RUNNER_TEMP}/gh-error"; then
+              echo "No ${PACKAGE} package in ghcr.io; nothing to delete"
+              exit 0
+            fi
+            cat "${RUNNER_TEMP}/gh-error" >&2
+            echo "::error title=Cleanup::could not list versions of ${PACKAGE}"
+            exit 1
+          fi
+
+          id_of() { jq -r --arg d "$1" 'map(select(.name == $d)) | first | .id // empty' <<< "${versions}"; }
+
+          # The signature and both attestations are separate untagged versions
+          # pointing at the image digest. They have to be resolved from the
+          # registry while the manifest they hang off still exists, and they are
+          # what turns "delete the tag" into a package that does not fill up
+          # with orphans. Best effort: losing them costs a few blobs.
+          ghcr_token=$(curl -fsSL -u "${OWNER}:${GH_TOKEN}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:${OWNER}/${PACKAGE}:pull" \
+            | jq -er .token) || ghcr_token=""
+          referrers_of() {
+            [[ -n "${ghcr_token}" ]] || return 0
+            curl -fsSL -H "Authorization: Bearer ${ghcr_token}" \
+              "https://ghcr.io/v2/${OWNER}/${PACKAGE}/referrers/$1" 2>/dev/null \
+              | jq -r '.manifests[]?.digest' || true
+          }
+
+          # `latest` is the one thing kept. It is the publishing scenario's tag,
+          # overwritten by every run, and keeping a version alive keeps the
+          # package alive - a package deleted down to nothing comes back on the
+          # next push without the Actions access grant that makes any of this
+          # possible.
+          keep=()
+          latest=$(jq -r 'map(select((.metadata.container.tags // []) | index("latest"))) | first | .name // empty' <<< "${versions}")
+          if [[ -n "${latest}" ]]; then
+            keep+=("$(id_of "${latest}")")
+            for referrer in $(referrers_of "${latest}"); do
+              keep+=("$(id_of "${referrer}")")
+            done
+          fi
+
+          # Every tag this run published carries its run id, so a concurrent run
+          # on another branch is never in scope - including the case where an
+          # identical build resolved to a digest both runs tagged.
+          doomed=()
+          for digest in $(jq -r --arg run "${RUN_ID}" \
+            '.[] | select((.metadata.container.tags // []) | any(test("-" + $run + "(-|$)"))) | .name' <<< "${versions}"); do
+            doomed+=("$(id_of "${digest}")")
+            for referrer in $(referrers_of "${digest}"); do
+              doomed+=("$(id_of "${referrer}")")
+            done
+          done
+
+          # Orphans from a run that died between pushing and cleaning up. Only
+          # once they are old enough that no run in flight can still want them.
+          cutoff=$(date -u -d '6 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+          while read -r id; do
+            [[ -n "${id}" ]] && doomed+=("${id}")
+          done < <(jq -r --arg cutoff "${cutoff}" \
+            '.[] | select(((.metadata.container.tags // []) | length) == 0) | select(.updated_at < $cutoff) | .id' <<< "${versions}")
+
+          failed=0
+          deleted=0
+          for id in $(printf '%s\n' "${doomed[@]}" | grep -E '^[0-9]+$' | sort -u); do
+            skip=""
+            for kept in "${keep[@]}"; do
+              [[ "${id}" == "${kept}" ]] && skip=yes
+            done
+            [[ -n "${skip}" ]] && continue
+
+            if gh api -X DELETE "/users/${OWNER}/packages/container/${PACKAGE_PATH}/versions/${id}" --silent; then
+              deleted=$((deleted + 1))
+            else
+              failed=1
+            fi
+          done
+
+          echo "Deleted ${deleted} version(s) of ${PACKAGE}; kept latest and its referrers."
+          if [[ "${failed}" -ne 0 ]]; then
+            echo "::error title=Cleanup::GITHUB_TOKEN can only delete versions of a package that grants this repository the Admin role under Package settings > Manage Actions access."
+            exit 1
+          fi
+
+  # One check to require on the branch.
+  result:
+    name: Test result
+    if: always()
+    needs:
+      - gate
+      - defaults
+      - build-only
+      - every-optional-input
+      - arm64
+      - multi-platform
+      - scan-disabled
+      - trivyignore-yaml
+      - trivyignore-plain
+      - published
+      - cleanup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          CAN_RUN: ${{ needs.gate.outputs.can-run }}
+        run: |-
+          set -euo pipefail
+          jq -r 'to_entries[] | "\(.value.result)\t\(.key)"' <<< "$RESULTS" | sort
+
+          # Every scenario needs `id-token: write`, so an event that cannot
+          # grant it leaves nothing to report. Said out loud rather than passed
+          # silently: a green check here means "not tested", not "tested".
+          if [[ "${CAN_RUN}" != "true" ]]; then
+            echo "::warning title=Tests::nothing ran - this event cannot grant id-token: write. Re-run manually against the branch."
+            exit 0
+          fi
+
+          # Otherwise every job was meant to run, so anything short of success -
+          # failed, cancelled or skipped - is a problem.
+          if jq -e 'to_entries | any(.value.result != "success")' <<< "$RESULTS" > /dev/null; then
+            echo "::error title=Tests::at least one scenario did not succeed"
+            exit 1
+          fi

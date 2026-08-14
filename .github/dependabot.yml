@@ -21,8 +21,9 @@ updates:
           - "minor"
           - "patch"
 
-  # The hooks are this repository's only tests: nothing here runs, so actionlint
-  # and zizmor are what stands between a bad edit and every caller's build.
+  # actionlint and zizmor judge every edit before test-build-and-push.yaml gets
+  # to run it - and they are the whole check on a dependabot pull request, which
+  # cannot grant the OIDC permission the calling scenarios need.
   - package-ecosystem: "pre-commit"
     directories:
       - "/"

@@ -1,0 +1,3 @@
+# The plain form, listed second, and the only file in that list that suppresses
+# anything. See decoy.trivyignore.
+CVE-2019-10744
