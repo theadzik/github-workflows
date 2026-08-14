@@ -143,8 +143,9 @@ change. Dependabot does not track this input either.
 ## Testing
 
 [`test-build-and-push.yaml`](.github/workflows/test-build-and-push.yaml) runs on any pull
-request that touches a workflow or a fixture. It calls `build-and-push.yaml` the way a
-caller does, once per scenario — `uses: ./` resolves to the copy on the pull request's own
+request that touches `build-and-push.yaml`, the test workflow itself, or `tests/`, and can
+be dispatched by hand against any branch. It calls `build-and-push.yaml` the way a caller
+does, once per scenario — `uses: ./` resolves to the copy on the pull request's own
 merge ref, so what runs is the change under review rather than what is already on `main`.
 
 Between them the scenarios cover every input, both values of every boolean, and every
