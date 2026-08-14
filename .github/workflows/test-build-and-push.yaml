@@ -10,9 +10,8 @@ on:
       - ".github/workflows/build-and-push.yaml"
       - ".github/workflows/test-build-and-push.yaml"
       - "tests/**"
-  # Dependabot's pull requests get a read-only token and no OIDC, so the
-  # scenarios below are skipped there - which is exactly when an action bump
-  # most wants testing. Re-run this by hand against the dependabot branch.
+  # For a branch the paths above do not match, and for a fork's pull request,
+  # which cannot run the scenarios on its own.
   workflow_dispatch:
 
 concurrency:
@@ -32,17 +31,24 @@ jobs:
     outputs:
       # A called workflow cannot hold more permission than its caller, and this
       # one needs `id-token: write` for keyless signing even when it is only
-      # building. A fork's pull request cannot grant that, and neither can
-      # dependabot's, so those runs would fail at startup rather than report
-      # anything. They are skipped instead, and `result` says the run tested
-      # nothing rather than reporting a quiet green.
-      can-run: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') }}
+      # building. A fork's pull request is capped at read-only and cannot grant
+      # it, so those runs would fail at startup rather than report anything.
+      # They are skipped instead, and `result` says the run tested nothing
+      # rather than reporting a quiet green.
+      #
+      # Dependabot's are not excluded. Its runs are treated like a fork's -
+      # read-only token, no repository secrets - but scopes named explicitly in
+      # a `permissions:` block are still granted, and every scenario below names
+      # all five. Nothing here reads a repository secret; `secrets.GITHUB_TOKEN`
+      # is the job token and is always present. Action bumps are the change this
+      # workflow most needs to test, so they run.
+      can-run: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository }}
       image: theadzik/github-workflows-test
       head-sha: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Report the decision
         env:
-          CAN_RUN: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') }}
+          CAN_RUN: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository }}
         run: |-
           set -euo pipefail
           if [[ "${CAN_RUN}" == "true" ]]; then

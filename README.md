@@ -157,9 +157,9 @@ digest the workflow reported.
 
 Only paths a passing run can reach are covered. A job calling a reusable workflow may not
 set `continue-on-error`, so a scenario meant to fail can only report failure — which leaves
-every guard that *fails* a build untested, the scan gate included. Pull requests from forks
-and from dependabot cannot grant `id-token: write` at all, so they skip every scenario and
-say so rather than reporting a quiet green.
+every guard that *fails* a build untested, the scan gate included. A fork's pull request
+cannot grant `id-token: write` at all, so it skips every scenario and says so rather than
+reporting a quiet green; dependabot's can, and does.
 
 The images the scenarios publish are deleted at the end of the same run, signatures and
 attestations included, leaving one `latest` version behind so the package — and the Actions
