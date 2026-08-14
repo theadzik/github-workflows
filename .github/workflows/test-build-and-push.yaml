@@ -34,8 +34,8 @@ jobs:
       # one needs `id-token: write` for keyless signing even when it is only
       # building. A fork's pull request cannot grant that, and neither can
       # dependabot's, so those runs would fail at startup rather than report
-      # anything. They are skipped instead; the two jobs below need nothing
-      # special and still cover them.
+      # anything. They are skipped instead, and `result` says the run tested
+      # nothing rather than reporting a quiet green.
       can-run: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') }}
       image: theadzik/github-workflows-test
       head-sha: ${{ github.event.pull_request.head.sha || github.sha }}

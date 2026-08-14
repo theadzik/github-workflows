@@ -26,8 +26,8 @@ vulnerability in a published npm release never stops being reported.
 It has to be a `node_modules` entry rather than a lockfile. Scanning an image, Trivy runs
 its node-pkg analyzer over installed `package.json` files; the lockfile analyzers only run
 against a filesystem, so a `package-lock.json` baked into an image scans as
-`language-specific files: 0` — indistinguishable from clean. `scan-gate` exists to catch
-exactly that: a fixture that has stopped being vulnerable.
+`language-specific files: 0` — indistinguishable from clean. Nothing here would notice; see
+what is not covered, below.
 
 ## What each scenario covers
 
