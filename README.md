@@ -26,6 +26,11 @@ blocked build into a passing one. This workflow writes its own configuration and
 so Trivy loads that instead, and what the caller can influence is the set of inputs below
 and nothing else. Callers who need an acceptance have `trivyignores`, which records one.
 
+**An end-of-life base fails the build.** A distribution that has stopped issuing security
+updates is the one case where an empty report means Trivy has nothing to *report* rather
+than nothing to find — an EOL Alpine scans clean and exits 0. `exit-on-eol` turns that into
+a failure, so the base image has to be one that can still be patched.
+
 **One artifact all the way through.** The digest comes from the layout's `index.json` —
 the digest that will exist in the registry, byte for byte. The scan, the push, the
 signature and both attestations all reference it. Nothing is rebuilt or re-exported in

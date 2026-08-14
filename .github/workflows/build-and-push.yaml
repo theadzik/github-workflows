@@ -237,10 +237,38 @@ jobs:
         run: |-
           set -euo pipefail
           cat > "${RUNNER_TEMP}/trivy.yaml" <<'EOF'
+          # An image whose distribution has stopped issuing security updates is
+          # the one case where Trivy reporting nothing means it has nothing to
+          # report, rather than nothing to find: an EOL alpine scans clean and
+          # exits 0 without this. Measured, not supposed.
+          exit-on-eol: 1
+
+          # Output shape. `dependency-tree` names what pulled a vulnerable
+          # package in, for the package managers that support it; the detailed
+          # table alone drops the summary that only repeats it. Trivy marks
+          # both EXPERIMENTAL.
+          dependency-tree: true
+          table-mode:
+            - detailed
+
           scan:
-            # Trivy's own default today, pinned so that a release which flips it
-            # cannot start reprinting accepted findings in every caller's log.
-            show-suppressed: false
+            # Which acceptances actually fired, with the statement and the file
+            # they came from - not just which file was in force.
+            show-suppressed: true
+            # Trivy's default today, written down so that a release which
+            # changes it cannot quietly stop looking for secrets. It is a gate
+            # rather than a report: a private key in a layer fails the build,
+            # and `ignore-unfixed` does not suppress it.
+            scanners:
+              - vuln
+              - secret
+
+          db:
+            # The bar only. The scan step deliberately does not pass
+            # `hide-progress`, which is `--quiet` and would take the log with
+            # it - including `Detected OS`, the EOL error above, and the
+            # language-file count that says whether an analyzer matched.
+            no-progress: true
           EOF
           echo "Trivy configuration for this run:"
           cat "${RUNNER_TEMP}/trivy.yaml"
@@ -254,13 +282,18 @@ jobs:
       # two competing targets.
       #
       # The action echoes the ignore file into the log before scanning, so a run
-      # that passed always shows which acceptances were in force when it did.
+      # that passed always shows which acceptances were in force when it did -
+      # and `show-suppressed` in the configuration above shows which of them
+      # actually fired.
+      #
+      # `hide-progress` is deliberately absent: it is `--quiet`, which drops the
+      # log along with the progress bar, and the log is where `Detected EOL OS`
+      # appears. The progress bar is turned off in the configuration instead.
       - name: Scan image for vulnerabilities
         if: inputs.scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           version: v0.74.0
-          hide-progress: true
           trivy-config: ${{ runner.temp }}/trivy.yaml
           input: ${{ runner.temp }}/layout
           severity: ${{ inputs.scan-severity }}
