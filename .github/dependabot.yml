@@ -22,8 +22,9 @@ updates:
           - "patch"
 
   # actionlint and zizmor judge every edit before test-build-and-push.yaml gets
-  # to run it - and they are the whole check on a dependabot pull request, which
-  # cannot grant the OIDC permission the calling scenarios need.
+  # to run it. That workflow does run on these pull requests, so a bump to an
+  # action this file pins is built, scanned, signed and attested for real before
+  # it is merged.
   - package-ecosystem: "pre-commit"
     directories:
       - "/"

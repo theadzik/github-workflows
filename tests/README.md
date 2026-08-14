@@ -69,10 +69,17 @@ repository that contains no application, so every scenario passes the input expl
 ## Who can run it
 
 The called workflow needs `id-token: write` for keyless signing even when it is only
-building, and a called workflow cannot hold more permission than its caller. Pull requests
-from forks and from dependabot cannot grant it, so every scenario is skipped there and the
-run tests nothing at all — it says so in an annotation rather than reporting a quiet green.
-Re-run the workflow manually against the branch to test a dependabot bump.
+building, and a called workflow cannot hold more permission than its caller. A fork's pull
+request is capped at read-only and cannot grant it, so every scenario is skipped there and
+the run tests nothing at all — it says so in an annotation rather than reporting a quiet
+green. Dispatch the workflow by hand against the branch to test one.
+
+Dependabot's pull requests do run. Its workflow runs are treated like a fork's — read-only
+token, no repository secrets — but scopes named explicitly in a `permissions:` block are
+still granted, and every scenario names all five. Nothing here reads a repository secret;
+`secrets.GITHUB_TOKEN` is the job token and is always present. Adding a scenario that needs
+one — a real second registry credential, say — is what would break this, and it would break
+it only for dependabot.
 
 ## Cleanup
 

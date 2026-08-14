@@ -10,9 +10,8 @@ on:
       - ".github/workflows/build-and-push.yaml"
       - ".github/workflows/test-build-and-push.yaml"
       - "tests/**"
-  # Dependabot's pull requests get a read-only token and no OIDC, so the
-  # scenarios below are skipped there - which is exactly when an action bump
-  # most wants testing. Re-run this by hand against the dependabot branch.
+  # For a branch the paths above do not match, and for a fork's pull request,
+  # which cannot run the scenarios on its own.
   workflow_dispatch:
 
 concurrency:
@@ -22,27 +21,38 @@ concurrency:
 permissions: {}
 
 jobs:
-  # One place to decide whether the calling scenarios can run at all, and one
-  # place to name the throwaway image they publish to. `needs` is the only
-  # context a called workflow's `with:` can read besides `github`, so constants
-  # that would otherwise be repeated eight times live here.
-  gate:
-    name: Decide what can run
+  # The values every scenario needs, in the only place they can be shared:
+  # `needs` is the only context a called workflow's `with:` can read besides
+  # `github`, so a constant either lives in a job output or is written out ten
+  # times and drifts.
+  shared:
+    name: Shared values
     runs-on: ubuntu-latest
     outputs:
-      # A called workflow cannot hold more permission than its caller, and this
-      # one needs `id-token: write` for keyless signing even when it is only
-      # building. A fork's pull request cannot grant that, and neither can
-      # dependabot's, so those runs would fail at startup rather than report
-      # anything. They are skipped instead, and `result` says the run tested
-      # nothing rather than reporting a quiet green.
-      can-run: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') }}
+      # Which image the scenarios publish to, and which ref the one scenario
+      # that checks out an explicit commit should use.
       image: theadzik/github-workflows-test
       head-sha: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      # The one thing here that is a decision, and it comes out true for
+      # everything except a fork's pull request. A called workflow cannot hold
+      # more permission than its caller, this one needs `id-token: write` for
+      # keyless signing even when it is only building, and a fork's token is
+      # capped at read-only however the caller's `permissions:` block is
+      # written. Those runs skip instead of going red, and `result` says the run
+      # tested nothing rather than reporting a quiet green.
+      #
+      # Dependabot's are not excluded. Its runs are treated like a fork's -
+      # read-only token, no repository secrets - but scopes named explicitly in
+      # a `permissions:` block are still granted, and every scenario below names
+      # all five. Nothing here reads a repository secret; `secrets.GITHUB_TOKEN`
+      # is the job token and is always present. Action bumps are the change this
+      # workflow most needs to test, so they run.
+      can-run: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
-      - name: Report the decision
+      - name: Report whether the scenarios can run
         env:
-          CAN_RUN: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]') }}
+          CAN_RUN: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository }}
         run: |-
           set -euo pipefail
           if [[ "${CAN_RUN}" == "true" ]]; then
@@ -70,8 +80,8 @@ jobs:
   # and no ignore or extra registry. The whole publishing chain runs.
   defaults:
     name: Defaults, full publish
-    needs: gate
-    if: needs.gate.outputs.can-run == 'true'
+    needs: shared
+    if: needs.shared.outputs.can-run == 'true'
     permissions:
       contents: read
       id-token: write
@@ -81,7 +91,7 @@ jobs:
     uses: ./.github/workflows/build-and-push.yaml
     with:
       registry: ghcr.io
-      image-name: ${{ needs.gate.outputs.image }}
+      image-name: ${{ needs.shared.outputs.image }}
       registry-username: ${{ github.actor }}
       context-path: tests/fixtures/clean
     secrets:
@@ -92,8 +102,8 @@ jobs:
   # shortened timeout.
   build-only:
     name: push false, build and scan only
-    needs: gate
-    if: needs.gate.outputs.can-run == 'true'
+    needs: shared
+    if: needs.shared.outputs.can-run == 'true'
     permissions:
       contents: read
       id-token: write
@@ -103,7 +113,7 @@ jobs:
     uses: ./.github/workflows/build-and-push.yaml
     with:
       registry: ghcr.io
-      image-name: ${{ needs.gate.outputs.image }}
+      image-name: ${{ needs.shared.outputs.image }}
       registry-username: ${{ github.actor }}
       context-path: tests/fixtures/clean
       push: false
@@ -124,8 +134,8 @@ jobs:
   # credential for a test image nothing pulls.
   every-optional-input:
     name: Build args, tags, ref, extra registry
-    needs: gate
-    if: needs.gate.outputs.can-run == 'true'
+    needs: shared
+    if: needs.shared.outputs.can-run == 'true'
     permissions:
       contents: read
       id-token: write
@@ -135,10 +145,10 @@ jobs:
     uses: ./.github/workflows/build-and-push.yaml
     with:
       registry: ghcr.io
-      image-name: ${{ needs.gate.outputs.image }}
+      image-name: ${{ needs.shared.outputs.image }}
       registry-username: ${{ github.actor }}
       context-path: tests/fixtures/build-args
-      git-ref: ${{ needs.gate.outputs.head-sha }}
+      git-ref: ${{ needs.shared.outputs.head-sha }}
       fetch-depth: 0
       build-args: |
         EXPECTED=passed-through
@@ -157,8 +167,8 @@ jobs:
   # wrong when it is left to pick for itself.
   arm64:
     name: linux/arm64 only
-    needs: gate
-    if: needs.gate.outputs.can-run == 'true'
+    needs: shared
+    if: needs.shared.outputs.can-run == 'true'
     permissions:
       contents: read
       id-token: write
@@ -168,7 +178,7 @@ jobs:
     uses: ./.github/workflows/build-and-push.yaml
     with:
       registry: ghcr.io
-      image-name: ${{ needs.gate.outputs.image }}
+      image-name: ${{ needs.shared.outputs.image }}
       registry-username: ${{ github.actor }}
       context-path: tests/fixtures/cross
       platforms: "linux/arm64"
@@ -180,8 +190,8 @@ jobs:
   # the first platform only, and the tags are published against the index digest.
   multi-platform:
     name: Multi-platform index
-    needs: gate
-    if: needs.gate.outputs.can-run == 'true'
+    needs: shared
+    if: needs.shared.outputs.can-run == 'true'
     permissions:
       contents: read
       id-token: write
@@ -191,7 +201,7 @@ jobs:
     uses: ./.github/workflows/build-and-push.yaml
     with:
       registry: ghcr.io
-      image-name: ${{ needs.gate.outputs.image }}
+      image-name: ${{ needs.shared.outputs.image }}
       registry-username: ${{ github.actor }}
       context-path: tests/fixtures/cross
       platforms: "linux/amd64,linux/arm64"
@@ -204,8 +214,8 @@ jobs:
   # put a known-vulnerable image in the registry.
   scan-disabled:
     name: scan false
-    needs: gate
-    if: needs.gate.outputs.can-run == 'true'
+    needs: shared
+    if: needs.shared.outputs.can-run == 'true'
     permissions:
       contents: read
       id-token: write
@@ -215,7 +225,7 @@ jobs:
     uses: ./.github/workflows/build-and-push.yaml
     with:
       registry: ghcr.io
-      image-name: ${{ needs.gate.outputs.image }}
+      image-name: ${{ needs.shared.outputs.image }}
       registry-username: ${{ github.actor }}
       context-path: tests/fixtures/vulnerable
       scan: false
@@ -226,8 +236,8 @@ jobs:
   # The YAML ignore form: one file, carrying a reason and an expiry.
   trivyignore-yaml:
     name: trivyignores, YAML form
-    needs: gate
-    if: needs.gate.outputs.can-run == 'true'
+    needs: shared
+    if: needs.shared.outputs.can-run == 'true'
     permissions:
       contents: read
       id-token: write
@@ -237,7 +247,7 @@ jobs:
     uses: ./.github/workflows/build-and-push.yaml
     with:
       registry: ghcr.io
-      image-name: ${{ needs.gate.outputs.image }}
+      image-name: ${{ needs.shared.outputs.image }}
       registry-username: ${{ github.actor }}
       context-path: tests/fixtures/vulnerable
       scan-severity: "CRITICAL"
@@ -250,8 +260,8 @@ jobs:
   # finding is listed second on purpose.
   trivyignore-plain:
     name: trivyignores, plain form, two files
-    needs: gate
-    if: needs.gate.outputs.can-run == 'true'
+    needs: shared
+    if: needs.shared.outputs.can-run == 'true'
     permissions:
       contents: read
       id-token: write
@@ -261,7 +271,7 @@ jobs:
     uses: ./.github/workflows/build-and-push.yaml
     with:
       registry: ghcr.io
-      image-name: ${{ needs.gate.outputs.image }}
+      image-name: ${{ needs.shared.outputs.image }}
       registry-username: ${{ github.actor }}
       context-path: tests/fixtures/vulnerable
       scan-severity: "CRITICAL"
@@ -278,8 +288,8 @@ jobs:
   # ---------------------------------------------------------------------------
   published:
     name: Verify what was published
-    needs: [gate, defaults]
-    if: needs.gate.outputs.can-run == 'true'
+    needs: [shared, defaults]
+    if: needs.shared.outputs.can-run == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -304,7 +314,7 @@ jobs:
         env:
           DIGEST: ${{ needs.defaults.outputs.digest }}
           IMAGE_REF: ${{ needs.defaults.outputs.image-ref }}
-          EXPECTED_REF: ghcr.io/${{ needs.gate.outputs.image }}
+          EXPECTED_REF: ghcr.io/${{ needs.shared.outputs.image }}
         run: |-
           set -euo pipefail
           if [[ ! "${DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
@@ -373,8 +383,8 @@ jobs:
   # left tags behind.
   cleanup:
     name: Delete this run's images
-    needs: [gate, defaults, every-optional-input, arm64, multi-platform, published]
-    if: always() && needs.gate.outputs.can-run == 'true'
+    needs: [shared, defaults, every-optional-input, arm64, multi-platform, published]
+    if: always() && needs.shared.outputs.can-run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -383,7 +393,7 @@ jobs:
       - name: Delete the package versions this run created
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE: ${{ needs.gate.outputs.image }}
+          IMAGE: ${{ needs.shared.outputs.image }}
           RUN_ID: ${{ github.run_id }}
         run: |-
           set -euo pipefail
@@ -495,7 +505,7 @@ jobs:
     name: Test result
     if: always()
     needs:
-      - gate
+      - shared
       - defaults
       - build-only
       - every-optional-input
@@ -511,7 +521,7 @@ jobs:
       - name: Collect
         env:
           RESULTS: ${{ toJSON(needs) }}
-          CAN_RUN: ${{ needs.gate.outputs.can-run }}
+          CAN_RUN: ${{ needs.shared.outputs.can-run }}
         run: |-
           set -euo pipefail
           jq -r 'to_entries[] | "\(.value.result)\t\(.key)"' <<< "$RESULTS" | sort
