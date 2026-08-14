@@ -1,0 +1,4 @@
+# Deliberately suppresses nothing. It is listed *first* in the comma-separated
+# `trivyignores` value, so the scenario only passes if every file in the list is
+# read - not just the first one.
+CVE-0000-0000

@@ -140,6 +140,33 @@ default. cosign 3.x writes the signature as an OCI referrer carrying the predica
 confirming against the cluster rather than inheriting from an installer default that can
 change. Dependabot does not track this input either.
 
+## Testing
+
+[`test-build-and-push.yaml`](.github/workflows/test-build-and-push.yaml) runs on any pull
+request that touches a workflow or a fixture. It calls `build-and-push.yaml` the way a
+caller does, once per scenario — `uses: ./` resolves to the copy on the pull request's own
+merge ref, so what runs is the change under review rather than what is already on `main`.
+
+Between them the scenarios cover every input, both values of every boolean, and every
+conditional step: defaults with a full publish, `push: false`, `scan: false`, both forms of
+`trivyignores`, build args, multiple tags, an explicit ref, a full-history checkout, an
+extra registry login, a single non-amd64 platform, and a multi-platform index. A final job
+verifies the signature, the referrers and the tag from outside the build, against the
+digest the workflow reported.
+
+Only paths a passing run can reach are covered. A job calling a reusable workflow may not
+set `continue-on-error`, so a scenario meant to fail can only report failure — which leaves
+every guard that *fails* a build untested, the scan gate included. Pull requests from forks
+and from dependabot cannot grant `id-token: write` at all, so they skip every scenario and
+say so rather than reporting a quiet green.
+
+The images the scenarios publish are deleted at the end of the same run, signatures and
+attestations included, leaving one `latest` version behind so the package — and the Actions
+access grant that lets the job delete anything at all — survives between runs.
+
+[`tests/README.md`](tests/README.md) documents the fixtures, what each scenario covers, and
+the two paths a green run cannot reach.
+
 ## Versioning
 
 Callers should pin to a commit SHA with the tag in a trailing comment. Dependabot's
