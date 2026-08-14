@@ -27,7 +27,7 @@ repos:
   # and signs what it builds, so that second question is the one that matters
   # here. Offline by default; the audits needing a GitHub token are skipped.
   - repo: https://github.com/zizmorcore/zizmor-pre-commit
-    rev: v1.28.0
+    rev: v1.29.0
     hooks:
       - id: zizmor
 
