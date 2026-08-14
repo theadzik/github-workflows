@@ -383,17 +383,31 @@ jobs:
       - name: Delete the package versions this run created
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OWNER: ${{ github.repository_owner }}
-          PACKAGE: github-workflows-test
+          IMAGE: ${{ needs.gate.outputs.image }}
           RUN_ID: ${{ github.run_id }}
         run: |-
           set -euo pipefail
+
+          # Owner and package name are split out of the one string the scenarios
+          # published to, rather than spelled out again here. A second copy
+          # could drift from it, and this job deletes untagged versions older
+          # than six hours: aimed at the wrong package, that is somebody's
+          # signatures and attestations.
+          OWNER="${IMAGE%%/*}"
+          PACKAGE="${IMAGE#*/}"
+          if [[ "${OWNER}" == "${IMAGE}" || -z "${PACKAGE}" ]]; then
+            echo "::error title=Cleanup::cannot split '${IMAGE}' into an owner and a package name"
+            exit 1
+          fi
+          # ghcr allows a nested path, which the REST API takes as one encoded
+          # name while the registry API takes it as written.
+          PACKAGE_PATH="${PACKAGE//\//%2F}"
 
           # gh prints the error body to stdout and exits non-zero, so a failure
           # has to be caught here rather than fed to jq: iterating an error
           # object yields its values, and the run would report "nothing to
           # delete" for what is really a permission problem.
-          if ! versions=$(gh api --paginate "/users/${OWNER}/packages/container/${PACKAGE}/versions" 2>"${RUNNER_TEMP}/gh-error"); then
+          if ! versions=$(gh api --paginate "/users/${OWNER}/packages/container/${PACKAGE_PATH}/versions" 2>"${RUNNER_TEMP}/gh-error"); then
             if grep -q '(HTTP 404)' "${RUNNER_TEMP}/gh-error"; then
               echo "No ${PACKAGE} package in ghcr.io; nothing to delete"
               exit 0
@@ -463,7 +477,7 @@ jobs:
             done
             [[ -n "${skip}" ]] && continue
 
-            if gh api -X DELETE "/users/${OWNER}/packages/container/${PACKAGE}/versions/${id}" --silent; then
+            if gh api -X DELETE "/users/${OWNER}/packages/container/${PACKAGE_PATH}/versions/${id}" --silent; then
               deleted=$((deleted + 1))
             else
               failed=1
