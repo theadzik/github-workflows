@@ -129,7 +129,7 @@ jobs:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
       EXTRA_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
-  # One non-default platform - the case syft gets wrong on its own.
+  # One non-default platform, built and scanned under emulation.
   arm64:
     name: linux/arm64 only
     needs: shared

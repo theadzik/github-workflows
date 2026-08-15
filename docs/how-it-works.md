@@ -23,7 +23,7 @@ pass before the next one runs.
 The build writes an OCI layout to disk. It does not push to the registry.
 
 Everything after that points at the same layout. Trivy scans it. `oras` pushes
-it. syft reads it. Nothing is built a second time.
+it. The SBOM comes from it. Nothing is built a second time.
 
 The digest comes from the layout's `index.json`. That file is the authority. The
 build action also reports a digest, but `index.json` is what the registry will
@@ -139,7 +139,26 @@ A private key in a layer fails the build. `ignore-unfixed` does not hide it.
 
 ## The SBOM
 
-The SBOM is CycloneDX, written by syft from the same layout.
+The SBOM is CycloneDX, written by Trivy from the same layout it scanned.
+
+Trivy writes it, not syft. Both were compared on the same layout, and their
+package coverage is identical:
+
+| | Trivy | syft |
+| --- | --- | --- |
+| `library` components | 17 | 17 |
+| `operating-system` components | 1 (`alpine`) | 1 (`alpine`) |
+| `file` components | 0 | 80 |
+| Packages the other missed | none | none |
+| CVEs found re-scanning the SBOM | 4 | 4 |
+
+syft's extra 80 components are file entries such as `/etc/passwd` and
+`/bin/busybox`. They are a file inventory, not packages, and they change nothing
+about which vulnerabilities a reader can match. Everything else is the same
+document, at the same CycloneDX version.
+
+Using Trivy removes a tool, an install step and a version pin. It also means the
+SBOM and the gate come from one binary and one pass over one layout.
 
 SPDX is not used. syft's SPDX writer does not emit an operating-system package.
 Trivy's SPDX reader needs that package to work out the distribution. Without it
@@ -151,13 +170,20 @@ packages where `trivy image` found twelve.
 BuildKit's own `sbom` option is not set, for the same reason. BuildKit writes
 SPDX only.
 
+The document carries the vulnerabilities Trivy found, because the scanners are
+enabled in the shared configuration. That is valid CycloneDX and it puts the
+findings on record next to the inventory.
+
 The step then checks its own output. If the SBOM has no `operating-system`
 component, the build fails. Attesting such a document would be worse than
 attesting nothing.
 
-syft needs to be told the platform. It defaults to `linux/amd64` and fails on a
-layout that does not contain it. The step passes the first platform in the list,
-which is why the SBOM covers one platform. See below.
+Trivy reads the first platform in the index, which is why the SBOM covers one
+platform. See below.
+
+One option cannot live in the shared configuration file: `table-mode`. Trivy
+rejects it unless the format is `table`, and this file is also used to write the
+SBOM. It is passed on the scan command line instead.
 
 ## Signing and attestation
 
@@ -213,12 +239,19 @@ The digest is unchanged, so the referrers attached to it stay findable.
 
 ### Every platform is scanned
 
-`trivy image --input` scans **one** platform of a multi-platform index.
+`trivy image --input` scans **one** platform of a multi-platform index. It picks
+the **first** platform entry in the index, and nothing else changes that choice.
 
-So a single scan of a two-platform index checks one image and signs two. That was
-measured, not supposed. A layout with a clean amd64 image and an arm64 image
-carrying `lodash@4.17.11` scanned clean and exited 0. The same arm64 image alone
-reported four CVEs, one of them CRITICAL.
+Building `linux/arm64,linux/amd64` instead of `linux/amd64,linux/arm64` makes
+Trivy scan arm64. That is the whole selection rule, measured against a layout
+built both ways.
+
+So a single scan of a two-platform index checks one image and signs two. A layout
+with a clean amd64 image and an arm64 image carrying `lodash@4.17.11` scanned
+clean and exited 0. The same arm64 image alone reported four CVEs, one CRITICAL.
+
+Rewriting the index is therefore not a workaround. It is the only input the
+choice responds to.
 
 ### Why not `trivy image --platform`
 
@@ -247,6 +280,25 @@ That breaks the rule this whole design exists for: nothing unscanned reaches the
 registry.
 
 Do not replace the rewrite loop with `--platform` without re-running that table.
+
+### Why not run Trivy in a container of the target platform
+
+QEMU is set up for cross-platform builds, so Trivy could run inside a
+`linux/arm64` container and scan the layout from there. The hope is that Trivy
+then picks the matching platform by itself.
+
+It does not. Measured with `tonistiigi/binfmt` emulation registered:
+
+| Trivy runs in | `uname -m` inside | Platform scanned | Time |
+| --- | --- | --- | --- |
+| `linux/amd64` container | `x86_64` | amd64 | 18s |
+| `linux/arm64` container | `aarch64` | **amd64** | 36s |
+
+The container really was arm64. Trivy still read the first entry in the index.
+Its choice does not depend on the architecture it runs on.
+
+The attempt also costs twice the time on a fixture with one package, before any
+real image is scanned, because the scanner itself is emulated.
 
 The workflow therefore scans each platform on its own. For each child manifest in
 the index it rewrites `index.json` to name only that manifest, runs Trivy against
@@ -283,8 +335,9 @@ does nothing.
 
 ### The SBOM still covers one platform
 
-syft is given the first platform in the list. The attested SBOM therefore
-describes that platform only.
+Trivy reads the first platform in the index, so the attested SBOM describes that
+platform only. Scanning does cover them all, because the loop rewrites the index;
+the SBOM step runs after the loop has restored it.
 
 An index built for several platforms carries one signed SBOM, and that SBOM does
 not describe the other images under it. The build warns when this applies.
@@ -299,12 +352,6 @@ writes the signature as an OCI referrer with the predicate
 `sha256-<digest>.sig` tag instead. Which one an admission controller accepts
 should not change because an installer default changed. Dependabot does not
 track this input.
-
-`syft` version is pinned above the action's default of v1.42.3. The
-default cannot read the layout this workflow builds. `provenance: mode=max`
-makes the layout root an image *index*, and v1.42.3 rejects it with
-`unexpected media type ... image.index.v1+json`. Check any new version against a
-layout with attestations before you raise it.
 
 `trivy` is installed by `aquasecurity/setup-trivy` with an explicit `version`,
 because the scan is a CLI loop rather than an action. Raising it changes what the

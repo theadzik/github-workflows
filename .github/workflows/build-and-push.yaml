@@ -147,7 +147,7 @@ jobs:
           echo "severity=${severities}" >> "$GITHUB_OUTPUT"
           echo "Fixable findings at ${severities} fail this build."
 
-      # Every platform is scanned, but syft still describes only the first.
+      # Every platform is scanned, but the SBOM describes only the first.
       - name: Warn on multi-platform SBOM coverage
         if: contains(inputs.platforms, ',')
         env:
@@ -284,9 +284,9 @@ jobs:
           # An EOL distro scans clean and exits 0 without this.
           exit-on-eol: 1
 
+          # `table-mode` is not here: it is rejected unless the format is table,
+          # and this file is also used to generate the CycloneDX SBOM.
           dependency-tree: true
-          table-mode:
-            - detailed
 
           scan:
             show-suppressed: true
@@ -336,7 +336,8 @@ jobs:
               --severity "${SEVERITY}" \
               --ignore-unfixed \
               --exit-code 1 \
-              --format table
+              --format table \
+              --table-mode detailed
           }
 
           # No provenance leaves a manifest at the root; anything else an index.
@@ -396,13 +397,6 @@ jobs:
         if: inputs.push
         uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
 
-      # Pinned above the action's default, which cannot read a layout whose root
-      # is an index. Check any new version against such a layout first.
-      - name: Install syft
-        if: inputs.push
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
-        with:
-          syft-version: v1.51.0
 
       # No tag yet, so nothing can select the image until the tags go up last.
       # The digest is read back from the registry rather than trusted.
@@ -430,18 +424,17 @@ jobs:
           DIGEST: ${{ steps.layout.outputs.digest }}
         run: cosign sign --yes "${IMAGE_REF}@${DIGEST}"
 
-      # CycloneDX, from the same layout Trivy scanned. syft's SPDX writer omits
-      # the OS component, and Trivy then reports nothing for the document.
+      # CycloneDX, from the same layout and the same binary that gated the
+      # build. Describes the first platform in the index.
       - name: Generate SBOM from the layout
         if: inputs.push
-        env:
-          PLATFORMS: ${{ inputs.platforms }}
         run: |-
           set -euo pipefail
-          # syft defaults to linux/amd64 and fails on a layout without it.
-          primary="${PLATFORMS%%,*}"
-          primary="${primary//[[:space:]]/}"
-          syft "oci-dir:${RUNNER_TEMP}/layout" --platform "${primary}" -o cyclonedx-json=sbom.cdx.json
+          trivy image \
+            --config "${RUNNER_TEMP}/trivy.yaml" \
+            --input "${RUNNER_TEMP}/layout" \
+            --format cyclonedx \
+            --output sbom.cdx.json
 
           os=$(jq -r '[.components[]? | select(.type=="operating-system") | .name] | join(",")' sbom.cdx.json)
           if [[ -z "${os}" ]]; then

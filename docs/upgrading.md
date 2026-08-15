@@ -132,7 +132,21 @@ No input changes for either. The behaviour follows `platforms`.
 One gap remains: the attested SBOM still describes the first platform in the
 list. The build prints a warning when that applies.
 
-### 6. Things that did not change
+### 6. The SBOM is written by Trivy, not syft
+
+v2 installed syft to write the CycloneDX SBOM. v3 uses Trivy, which already runs
+for the scan.
+
+No input changes, and the SBOM is still CycloneDX with an `operating-system`
+component, so anything reading it keeps working. Two differences if you compare
+documents byte for byte:
+
+- syft also emitted about 80 `file` components, such as `/etc/passwd`. Trivy does
+  not. Package coverage is identical, and re-scanning either document reports the
+  same CVEs.
+- Trivy embeds the vulnerabilities it found, because the scanners are enabled.
+
+### 7. Things that did not change
 
 - Every other input keeps its name, type and default.
 - The outputs are unchanged.
