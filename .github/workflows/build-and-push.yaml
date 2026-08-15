@@ -288,10 +288,45 @@ jobs:
       # These settings are the weakest layer: the action's documented order is
       # input, then environment variable, then config file, then default, so
       # anything the scan step passes below still wins.
+      #
+      # `trivy.yaml` is not the only file Trivy looks for in the working
+      # directory, and naming it closed one hole out of three. The other two are
+      # closed at the bottom of this step, where the paths are pinned:
+      #
+      #   .trivyignore      Trivy's default `ignorefile`. A caller committing one
+      #                     at their repository root suppresses whatever they
+      #                     list, with no input set and nothing in the log naming
+      #                     the file. Verified against tests/fixtures/vulnerable:
+      #                     the four CVEs in it scanned clean.
+      #   trivy-secret.yaml Trivy's default `secret.config`. `disable-rules:
+      #                     [private-key]` in one turns the secret scanner into a
+      #                     no-op while it still appears in the log as enabled.
+      #                     Verified against an image carrying an RSA key.
+      #
+      # `.trivyignore.yaml` is *not* discovered this way - it only applies when
+      # named - so it needs no gate. Checked rather than assumed.
       - name: Write the Trivy configuration
         if: inputs.push || inputs.scan
         run: |-
           set -euo pipefail
+
+          # The two files the pins below point at. Outside the workspace, so
+          # discovery lands on these rather than on anything the caller
+          # committed.
+          #
+          # The secret config has to be `disable-rules: []` rather than empty or
+          # comment-only: Trivy decodes this file separately from the main
+          # config and a document with no YAML node in it fails the run outright
+          # with "secrets config decode error: EOF". An empty list is the way to
+          # say "disable nothing", and leaves every builtin rule in place -
+          # confirmed against an image carrying an RSA key, which still fails.
+          : > "${RUNNER_TEMP}/empty.trivyignore"
+          cat > "${RUNNER_TEMP}/trivy-secret.yaml" <<'EOF'
+          # Disables nothing. Present only so that Trivy's default discovery of
+          # a workspace trivy-secret.yaml has somewhere else to land.
+          disable-rules: []
+          EOF
+
           cat > "${RUNNER_TEMP}/trivy.yaml" <<'EOF'
           # An image whose distribution has stopped issuing security updates is
           # the one case where Trivy reporting nothing means it has nothing to
@@ -326,6 +361,22 @@ jobs:
             # language-file count that says whether an analyzer matched.
             no-progress: true
           EOF
+
+          # Appended rather than written into the heredoc above, which is
+          # unexpanded on purpose so that nothing in it can be substituted.
+          # These are the only two values that need a path resolved at runtime.
+          #
+          # `ignorefile` here is a default, not a lock: it sits in the config
+          # layer, so a caller's `trivyignores` input still overrides it. That is
+          # the intended split - an acceptance this workflow was told about wins,
+          # an acceptance it was not told about is not found at all.
+          {
+            printf '\n'
+            printf '# Pinned away from the caller workspace. See the step comment.\n'
+            printf 'ignorefile: %s\n' "${RUNNER_TEMP}/empty.trivyignore"
+            printf 'secret:\n  config: %s\n' "${RUNNER_TEMP}/trivy-secret.yaml"
+          } >> "${RUNNER_TEMP}/trivy.yaml"
+
           echo "Trivy configuration for this run:"
           cat "${RUNNER_TEMP}/trivy.yaml"
 

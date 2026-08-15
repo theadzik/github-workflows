@@ -18,13 +18,22 @@ build → OCI layout on disk → Trivy → push by digest (no tag)
 Trivy scans the layout in place. A finding fails the job before a single byte is pushed.
 The same exporter serves pull requests, which simply never push what they built.
 
-**The scan configures itself.** Trivy reads `trivy.yaml` from the working directory unless
-it is told otherwise, and that directory is the caller's checked-out repository — so a
-`trivy.yaml` there would reconfigure the scan gating that caller's own publish, no input
-required. `scan.skip-dirs` over the path holding a vulnerable package is enough to turn a
-blocked build into a passing one. This workflow writes its own configuration and names it,
-so Trivy loads that instead, and what the caller can influence is the set of inputs below
-and nothing else. Callers who need an acceptance have `trivyignores`, which records one.
+**The scan configures itself.** Trivy discovers three files in the working directory, and
+that directory is the caller's checked-out repository — so each is a way to reconfigure the
+scan gating that caller's own publish, with no input set and nothing in the log naming the
+file. All three are pinned to files this workflow writes outside the workspace:
+
+| Discovered | What a committed one does | Verified against |
+| --- | --- | --- |
+| `trivy.yaml` | `scan.skip-dirs` over the path holding a vulnerable package turns a blocked build into a passing one. | `tests/fixtures/vulnerable` |
+| `.trivyignore` | Trivy's default `ignorefile`. Suppresses whatever it lists. | Same fixture — all four of its CVEs scanned clean. |
+| `trivy-secret.yaml` | Trivy's default `secret.config`. `disable-rules: [private-key]` makes the secret scanner a no-op while the log still shows it enabled. | An image carrying an RSA private key. |
+
+`.trivyignore.yaml` is *not* discovered this way — it applies only when named — so it needs
+no pin. What a caller can influence is the set of inputs below and nothing else. Callers who
+need an acceptance have `trivyignores`, which still overrides the pinned default, because an
+acceptance this workflow was told about is a decision on record; one it was not told about
+is not found at all.
 
 **An end-of-life base fails the build.** A distribution that has stopped issuing security
 updates is the one case where an empty report means Trivy has nothing to *report* rather
