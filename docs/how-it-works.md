@@ -178,6 +178,36 @@ The step then checks its own output. If the SBOM has no `operating-system`
 component, the build fails. Attesting such a document would be worse than
 attesting nothing.
 
+### Why the gate scans the image, not the SBOM
+
+Trivy can scan an SBOM with `trivy sbom`. Doing that instead of scanning the
+image would lose the secret gate, and gain nothing else.
+
+Measured on one image, `alpine:3.19` carrying `lodash@4.17.11` and an RSA
+private key:
+
+| | `trivy image` | `trivy sbom` |
+| --- | --- | --- |
+| Vulnerabilities | 11 | 11 |
+| Missed by the other | none | none |
+| OS and language packages | both | both |
+| EOL detected, `exit-on-eol` fires | yes | yes |
+| Secrets found | 1 (`private-key`) | **0** |
+| Time, warm database | 112 ms | 109 ms |
+
+Secret scanning is not merely absent. `trivy sbom --scanners secret` is refused
+by the CLI, which accepts only `vuln` and `license`. An SBOM records what is
+installed, not what the files contain, so a private key baked into a layer
+cannot appear in it.
+
+There is no speed argument either. Writing the SBOM requires the same full pass
+over the image, so scanning the SBOM afterwards adds work rather than replacing
+it.
+
+The gate would also become indirect. Scanning the image tests the artifact.
+Scanning the SBOM tests a description of the artifact, and anything the
+description missed is invisible to the gate.
+
 Trivy reads the first platform in the index, which is why the SBOM covers one
 platform. See below.
 
