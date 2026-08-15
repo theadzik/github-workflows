@@ -164,63 +164,6 @@ jobs:
           # layer built by a `COPY .`. Nothing here pushes via git.
           persist-credentials: false
 
-      # A cross-platform RUN needs emulation. Skipped for a native-only build,
-      # where it would cost time and do nothing.
-      - name: Set up QEMU
-        if: inputs.platforms != 'linux/amd64'
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      - name: Login to registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ${{ inputs.registry }}
-          username: ${{ inputs.registry-username }}
-          password: ${{ secrets.REGISTRY_PASSWORD }}
-
-      - name: Login to extra registry
-        if: inputs.extra-registry != ''
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ${{ inputs.extra-registry }}
-          username: ${{ inputs.extra-registry-username }}
-          password: ${{ secrets.EXTRA_REGISTRY_PASSWORD }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ${{ env.IMAGE_REF }}
-          tags: ${{ inputs.tags }}
-
-      # Exports to disk, not to the registry, so the scan runs before the push.
-      # Do not set `sbom`: BuildKit writes SPDX, which Trivy reads as empty.
-      - name: Build to OCI layout
-        id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: ${{ inputs.context-path }}
-          platforms: ${{ inputs.platforms }}
-          outputs: type=oci,tar=false,dest=${{ runner.temp }}/layout,name=${{ env.IMAGE_REF }}
-          labels: ${{ steps.meta.outputs.labels }}
-          annotations: ${{ steps.meta.outputs.annotations }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: ${{ inputs.push && 'mode=max' || 'false' }}
-          build-args: |
-            ${{ inputs.build-args }}
-
-      # index.json is the authority, not the action's digest output.
-      - name: Read layout digest
-        id: layout
-        run: |-
-          set -euo pipefail
-          digest=$(jq -er '.manifests[0].digest' "${RUNNER_TEMP}/layout/index.json")
-          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-          echo "Built ${digest}"
-
       # Trivy finds trivy.yaml, .trivyignore and trivy-secret.yaml in the working
       # directory, which is the caller's repo. All three are pinned here instead.
       - name: Write the Trivy configuration
@@ -317,6 +260,95 @@ jobs:
         uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
         with:
           version: v0.74.0
+
+      # Lock files and secrets, before anything is built. The image scan reads
+      # installed packages instead, so neither of the two covers the other.
+      - name: Scan the build context
+        if: inputs.push || inputs.scan
+        env:
+          SEVERITY: ${{ steps.severity.outputs.severity }}
+          CONTEXT: ${{ inputs.context-path }}
+        run: |-
+          set -euo pipefail
+          trivy fs \
+            --config "${RUNNER_TEMP}/trivy.yaml" \
+            --severity "${SEVERITY}" \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --format table \
+            --table-mode detailed \
+            "${CONTEXT}"
+
+      # Only attested on a publishing run, so only built on one.
+      - name: Generate source SBOM
+        if: inputs.push
+        env:
+          CONTEXT: ${{ inputs.context-path }}
+        run: |-
+          set -euo pipefail
+          trivy fs \
+            --config "${RUNNER_TEMP}/trivy.yaml" \
+            --format cyclonedx \
+            --output "${RUNNER_TEMP}/sbom-source.cdx.json" \
+            "${CONTEXT}"
+          echo "Source SBOM: $(jq '.components|length' "${RUNNER_TEMP}/sbom-source.cdx.json") components from ${CONTEXT}"
+
+      # A cross-platform RUN needs emulation. Skipped for a native-only build,
+      # where it would cost time and do nothing.
+      - name: Set up QEMU
+        if: inputs.platforms != 'linux/amd64'
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Login to registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ inputs.registry-username }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Login to extra registry
+        if: inputs.extra-registry != ''
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ inputs.extra-registry }}
+          username: ${{ inputs.extra-registry-username }}
+          password: ${{ secrets.EXTRA_REGISTRY_PASSWORD }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE_REF }}
+          tags: ${{ inputs.tags }}
+
+      # Exports to disk, not to the registry, so the scan runs before the push.
+      # Do not set `sbom`: BuildKit writes SPDX, which Trivy reads as empty.
+      - name: Build to OCI layout
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ inputs.context-path }}
+          platforms: ${{ inputs.platforms }}
+          outputs: type=oci,tar=false,dest=${{ runner.temp }}/layout,name=${{ env.IMAGE_REF }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: ${{ inputs.push && 'mode=max' || 'false' }}
+          build-args: |
+            ${{ inputs.build-args }}
+
+      # index.json is the authority, not the action's digest output.
+      - name: Read layout digest
+        id: layout
+        run: |-
+          set -euo pipefail
+          digest=$(jq -er '.manifests[0].digest' "${RUNNER_TEMP}/layout/index.json")
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "Built ${digest}"
 
       # `--platform` is accepted but silently ignored for `--input`, so each
       # platform is scanned with index.json rewritten to name only that one.
@@ -426,7 +458,7 @@ jobs:
 
       # CycloneDX, from the same layout and the same binary that gated the
       # build. Describes the first platform in the index.
-      - name: Generate SBOM from the layout
+      - name: Generate image SBOM from the layout
         if: inputs.push
         run: |-
           set -euo pipefail
@@ -445,13 +477,24 @@ jobs:
 
       # actions/attest sets the predicate type itself. The Kyverno policy in
       # homelab matches https://cyclonedx.org/bom exactly.
-      - name: Attest SBOM
+      - name: Attest image SBOM
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         if: inputs.push
         with:
           subject-name: ${{ env.IMAGE_REF }}
           subject-digest: ${{ steps.layout.outputs.digest }}
           sbom-path: sbom.cdx.json
+          push-to-registry: true
+
+      # The build-time dependency tree, as a second CycloneDX attestation. Tell
+      # the two apart by metadata.component.type: application, or container.
+      - name: Attest source SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        if: inputs.push
+        with:
+          subject-name: ${{ env.IMAGE_REF }}
+          subject-digest: ${{ steps.layout.outputs.digest }}
+          sbom-path: ${{ runner.temp }}/sbom-source.cdx.json
           push-to-registry: true
 
       - name: Attest Provenance

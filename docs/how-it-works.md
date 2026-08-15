@@ -72,6 +72,46 @@ in a script because a workflow expression cannot reject a bad value.
 That step runs first, and it runs always. A bad value then costs a few seconds.
 If the step ran later, it would cost a full build.
 
+## The source is scanned as well as the image
+
+A multi-stage build throws most of its dependencies away. The blog builds with
+`pnpm install` on a node image, then copies only the compiled site into an nginx
+image. `node_modules` never reaches the runtime stage.
+
+Trivy scanning that image reports `Number of language-specific files num=0`, and
+it is right: there are no JavaScript packages in the artifact. The build-time
+dependencies are still real, though. A compromised one can change what the build
+emits, even though it does not ship.
+
+So the workflow scans both, and the two see different things:
+
+| | Reads | Finds |
+| --- | --- | --- |
+| `trivy fs` on the build context | lock files, and file contents | build-time dependencies, and secrets |
+| `trivy image` on the layout | installed packages, and file contents | what actually ships, and secrets |
+
+Both scans use the same pinned configuration, which enables the `vuln` and
+`secret` scanners. The build context is therefore a secret gate as well as a
+dependency gate: a private key sitting next to the Dockerfile fails the build
+before the build starts, exactly as one baked into a layer fails it afterwards.
+Measured, not assumed.
+
+Neither is a subset of the other. `tests/fixtures/vulnerable` carries a
+`node_modules` entry with no lock file, and the source scan reports nothing for
+it. `tests/fixtures/source-deps` carries a lock file and no installed package,
+and the image scan reports nothing for it. Both were measured.
+
+The source scan runs on `context-path`, because that is exactly the input a
+`docker build` is allowed to read. It uses the same severity floor, the same
+`trivyignores`, and the same pinned configuration as the image scan.
+
+It also runs **before** the build. A finding in the source costs seconds rather
+than a full build, which is the same reasoning as `Resolve scan severities`.
+
+Findings are reported by whatever id the advisory carries. For npm that is often
+a GHSA rather than a CVE, so a `trivyignores` entry has to use the id the scan
+printed.
+
 ## The caller cannot reconfigure the scan
 
 The working directory during the scan is the **caller's** repository. Trivy
@@ -210,6 +250,21 @@ description missed is invisible to the gate.
 
 Trivy reads the first platform in the index, which is why the SBOM covers one
 platform. See below.
+
+There are two SBOM attestations, both CycloneDX, both on the image digest. Tell
+them apart by `metadata.component.type`:
+
+| | `type` | `name` |
+| --- | --- | --- |
+| Image SBOM | `container` | the on-disk layout path |
+| Source SBOM | `application` | the `context-path` value |
+
+Use the `type`. The image SBOM's `name` is a runner temp path, which identifies
+nothing useful.
+
+`cosign verify-attestation --type cyclonedx` accepts both and returns both.
+Measured, because a second attestation of the same predicate type could have
+broken the verification step.
 
 One option cannot live in the shared configuration file: `table-mode`. Trivy
 rejects it unless the format is `table`, and this file is also used to write the

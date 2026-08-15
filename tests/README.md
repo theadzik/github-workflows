@@ -17,6 +17,7 @@ The workflow file carries short comments only. The reasons are here.
 | `fixtures/build-args` | `build-args` | The `RUN` is the assertion. Args that never arrive leave the variables empty and fail the build. There are two, because the input is newline-separated. |
 | `fixtures/cross` | `linux/arm64`, and the multi-platform index | The `RUN` is the assertion. It fails with `exec format error` without QEMU, so a green run proves emulation works, and it checks that `uname -m` matches the requested `TARGETARCH`. |
 | `fixtures/vulnerable` | Every scan scenario | Carries `lodash@4.17.11` in `node_modules`. CVE-2019-10744 is CRITICAL and fixed in 4.17.12, so it survives `ignore-unfixed`. |
+| `fixtures/source-deps` | The source scan | A `package-lock.json` pinning `lodash@4.17.11`, and an image that installs nothing. A finding can only come from `trivy fs`. |
 | `trivyignore/*` | `trivyignores`, both forms | One YAML file with a reason and an expiry. Two plain files, where only the second suppresses anything. |
 
 Base images float on `alpine:latest` on purpose. A digest pin would collect
@@ -46,6 +47,7 @@ from clean.
 | `multi-platform` | The SBOM coverage warning, an index push, QEMU, and the per-platform scan loop running more than once. |
 | `scan-disabled` | `scan: false` against the vulnerable fixture. Built, never pushed, because `scan: false` applies only when `push` is `false`. |
 | `trivyignore-yaml` / `trivyignore-plain` | Both accepted forms of `trivyignores`. |
+| `source-deps` | The source scan reading a lock file, and `trivyignores` applying to it. The image holds no vulnerable package, so a green run proves the source scan ran and was filtered. |
 | `published` | The `digest` and `image-ref` outputs, the signature, the referrers and the tag. Checked from outside, against what `defaults` left in the registry. |
 
 Two scenarios are shaped by details worth stating.
@@ -70,7 +72,8 @@ therefore only report failure, and no green run proves it.
 
 Every guard in `build-and-push.yaml` is untested for this reason:
 
-- the scan failing the build on a fixable HIGH or CRITICAL,
+- the scan failing the build on a fixable HIGH or CRITICAL, in the image or in
+  the source,
 - `Resolve scan severities` rejecting `HIGH`, or a value that is not a severity,
 - the SBOM step refusing a document with no operating-system component,
 - the push step catching a registry that stored a different digest,
