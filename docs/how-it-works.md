@@ -225,8 +225,27 @@ a substitute for it.
 
 Both use the same keyless identity: this workflow's OIDC token.
 
+### Every child is signed, not only the index
+
+`cosign sign` runs with `--recursive`. On a multi-platform build that signs the
+index **and** each child manifest.
+
+This matters because the OCI specs do not say which one an artifact should hang
+off. `subject` is defined identically for a manifest and for an index, and the
+distribution spec's referrers API is an exact-digest lookup: a referrer attached
+to a child is not returned when querying the index, and the reverse is also true.
+So the choice is mechanical, not normative, and signing both ends removes it.
+
+Measured against a local registry with cosign v3.1.2, one `--recursive` sign of a
+two-platform index produced five signatures: the index, both platform manifests,
+and both of buildkit's `unknown/unknown` attestation manifests.
+
 The workflow then verifies its own signature, before any tag exists. An identity
 the cluster would refuse fails the build instead of the rollout.
+
+Verification covers the same five digests, for the reason the rest of this page
+keeps repeating: a child that failed to sign would otherwise be found by the
+cluster rather than by the build.
 
 The verification names one signer:
 
@@ -368,6 +387,21 @@ does nothing.
 Trivy reads the first platform in the index, so the attested SBOM describes that
 platform only. Scanning does cover them all, because the loop rewrites the index;
 the SBOM step runs after the loop has restored it.
+
+The platforms really do differ, so this is a gap rather than a formality. An
+`alpine` image built for amd64 and arm64 from one Dockerfile, with no
+per-architecture logic at all, produced two SBOMs with the same 27 packages at
+the same versions — and 26 of the 27 purls different:
+
+```text
+amd64: pkg:apk/alpine/libcrypto3@3.5.7-r0?arch=x86_64&distro=3.24.1
+arm64: pkg:apk/alpine/libcrypto3@3.5.7-r0?arch=aarch64&distro=3.24.1
+```
+
+purl is what a consumer matches on, so an arm64 deployment does not match the
+attested amd64 document. A Dockerfile that varies by `TARGETARCH` can differ far
+more than that: the multi-platform test fixture carries a vulnerable package on
+one architecture and not the other.
 
 An index built for several platforms carries one signed SBOM, and that SBOM does
 not describe the other images under it. The build warns when this applies.

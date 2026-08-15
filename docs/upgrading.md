@@ -146,7 +146,17 @@ documents byte for byte:
   same CVEs.
 - Trivy embeds the vulnerabilities it found, because the scanners are enabled.
 
-### 7. Things that did not change
+### 7. Every platform of a multi-platform image is signed
+
+v2 signed the index only. v3 adds `cosign sign --recursive`, which signs the
+index and every child manifest, and then verifies all of them before publishing
+any tag.
+
+No input changes. A multi-platform build now produces more signatures than it
+did, and a single-platform build produces two or three instead of one, because
+buildkit's provenance manifests are children too.
+
+### 8. Things that did not change
 
 - Every other input keeps its name, type and default.
 - The outputs are unchanged.

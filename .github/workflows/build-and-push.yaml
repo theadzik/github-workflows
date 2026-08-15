@@ -416,13 +416,13 @@ jobs:
             exit 1
           fi
 
-      # A signature *on* the image. Kyverno's verifyImageSignatures needs this,
-      # and an attestation is not a substitute.
+      # A signature *on* the image; an attestation is not a substitute.
+      # `--recursive` signs every child, not only the index.
       - name: Sign image
         if: inputs.push
         env:
           DIGEST: ${{ steps.layout.outputs.digest }}
-        run: cosign sign --yes "${IMAGE_REF}@${DIGEST}"
+        run: cosign sign --yes --recursive "${IMAGE_REF}@${DIGEST}"
 
       # CycloneDX, from the same layout and the same binary that gated the
       # build. Describes the first platform in the index.
@@ -462,7 +462,9 @@ jobs:
           subject-digest: ${{ steps.layout.outputs.digest }}
           push-to-registry: true
 
-      - name: Verify signature
+      # Checks the index and every child, because `--recursive` signed them all.
+      # A child that failed to sign would otherwise surface at admission.
+      - name: Verify signatures
         if: inputs.push
         env:
           DIGEST: ${{ steps.layout.outputs.digest }}
@@ -471,11 +473,27 @@ jobs:
           SIGNER_IDENTITY: '^https://github\.com/theadzik/github-workflows/\.github/workflows/build-and-push\.yaml@.+$'
         run: |-
           set -euo pipefail
-          cosign verify \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --certificate-identity-regexp "${SIGNER_IDENTITY}" \
-            "${IMAGE_REF}@${DIGEST}" > /dev/null
-          echo "Signature verified for ${IMAGE_REF}@${DIGEST}"
+          index="${RUNNER_TEMP}/layout/index.json"
+
+          digests=("${DIGEST}")
+          if [[ "$(jq -r '.manifests[0].mediaType' "${index}")" == "application/vnd.oci.image.index.v1+json" ]]; then
+            root=$(jq -r '.manifests[0].digest' "${index}" | sed 's/^sha256://')
+            # Command substitution, not `< <(...)`: a process substitution that
+            # fails here would leave the children unverified and still exit 0.
+            children=$(jq -r '.manifests[].digest' "${RUNNER_TEMP}/layout/blobs/sha256/${root}")
+            while read -r child; do
+              [[ -n "${child}" ]] && digests+=("${child}")
+            done <<< "${children}"
+          fi
+
+          for digest in "${digests[@]}"; do
+            cosign verify \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --certificate-identity-regexp "${SIGNER_IDENTITY}" \
+              "${IMAGE_REF}@${digest}" > /dev/null
+            echo "Verified ${IMAGE_REF}@${digest}"
+          done
+          echo "Verified ${#digests[@]} signature(s)."
 
       # Last, so the image becomes discoverable only once it is signed.
       # `imagetools create` keeps the digest, so the referrers stay findable.
