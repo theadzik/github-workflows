@@ -43,7 +43,7 @@ on:
         type: string
         default: ""
       platforms:
-        description: "Multi-platform is allowed, but Trivy scans only one platform of the index."
+        description: "Comma-separated. Every platform is scanned. Anything other than linux/amd64 sets up QEMU, so a cross build can RUN."
         required: false
         type: string
         default: "linux/amd64"
@@ -147,12 +147,13 @@ jobs:
           echo "severity=${severities}" >> "$GITHUB_OUTPUT"
           echo "Fixable findings at ${severities} fail this build."
 
-      - name: Warn on multi-platform scan coverage
+      # Every platform is scanned, but syft still describes only the first.
+      - name: Warn on multi-platform SBOM coverage
         if: contains(inputs.platforms, ',')
         env:
           PLATFORMS: ${{ inputs.platforms }}
         run: |-
-          echo "::warning title=Scan coverage::${PLATFORMS} produces a multi-platform index. Trivy scans and syft inventories one platform; the others are signed unscanned and undescribed."
+          echo "::warning title=SBOM coverage::${PLATFORMS} produces a multi-platform index. Every platform is scanned, but the attested SBOM describes the first one only."
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -162,6 +163,12 @@ jobs:
           # Keeps the checkout token out of .git/config, the build cache and any
           # layer built by a `COPY .`. Nothing here pushes via git.
           persist-credentials: false
+
+      # A cross-platform RUN needs emulation. Skipped for a native-only build,
+      # where it would cost time and do nothing.
+      - name: Set up QEMU
+        if: inputs.platforms != 'linux/amd64'
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -218,6 +225,8 @@ jobs:
       # directory, which is the caller's repo. All three are pinned here instead.
       - name: Write the Trivy configuration
         if: inputs.push || inputs.scan
+        env:
+          TRIVYIGNORES: ${{ inputs.trivyignores }}
         run: |-
           set -euo pipefail
 
@@ -227,6 +236,49 @@ jobs:
           cat > "${RUNNER_TEMP}/trivy-secret.yaml" <<'EOF'
           disable-rules: []
           EOF
+
+          # Resolve `trivyignores` against the caller's checkout. One YAML file,
+          # or one or more plain files concatenated. Mixing the forms is refused.
+          ignorefile="${RUNNER_TEMP}/empty.trivyignore"
+          yaml=() plain=()
+          IFS=',' read -ra requested <<< "${TRIVYIGNORES}"
+          for raw in "${requested[@]}"; do
+            path="${raw#"${raw%%[![:space:]]*}"}"
+            path="${path%"${path##*[![:space:]]}"}"
+            [[ -z "${path}" ]] && continue
+            if [[ ! -f "${path}" ]]; then
+              echo "::error title=trivyignores::${path} does not exist in the checked-out repository"
+              exit 1
+            fi
+            case "${path}" in
+              *.yaml | *.yml) yaml+=("${path}") ;;
+              *) plain+=("${path}") ;;
+            esac
+          done
+
+          if [[ ${#yaml[@]} -gt 0 && ${#plain[@]} -gt 0 ]]; then
+            echo "::error title=trivyignores::cannot mix the YAML form with plain .trivyignore files"
+            exit 1
+          elif [[ ${#yaml[@]} -gt 1 ]]; then
+            echo "::error title=trivyignores::only one .trivyignore.yaml is allowed, got ${#yaml[@]}"
+            exit 1
+          elif [[ ${#yaml[@]} -eq 1 ]]; then
+            # Absolute, so the scan step does not depend on its working
+            # directory matching this one.
+            ignorefile=$(realpath "${yaml[0]}")
+          elif [[ ${#plain[@]} -gt 0 ]]; then
+            ignorefile="${RUNNER_TEMP}/combined.trivyignore"
+            cat "${plain[@]}" > "${ignorefile}"
+          fi
+
+          # Echoed so a run that passed always shows which acceptances were in
+          # force. `show-suppressed` below shows which of them actually fired.
+          if [[ "${ignorefile}" != "${RUNNER_TEMP}/empty.trivyignore" ]]; then
+            echo "Ignore file in force (${ignorefile}):"
+            cat "${ignorefile}"
+          else
+            echo "No ignore file; every finding counts."
+          fi
 
           cat > "${RUNNER_TEMP}/trivy.yaml" <<'EOF'
           # An EOL distro scans clean and exits 0 without this.
@@ -251,27 +303,87 @@ jobs:
           # Appended, because the heredoc above is unexpanded on purpose.
           {
             printf '\n'
-            printf 'ignorefile: %s\n' "${RUNNER_TEMP}/empty.trivyignore"
+            printf 'ignorefile: %s\n' "${ignorefile}"
             printf 'secret:\n  config: %s\n' "${RUNNER_TEMP}/trivy-secret.yaml"
           } >> "${RUNNER_TEMP}/trivy.yaml"
 
           echo "Trivy configuration for this run:"
           cat "${RUNNER_TEMP}/trivy.yaml"
 
-      # Scans the layout on disk, so a finding keeps the image out of the
-      # registry. Do not add `image-ref`: it competes with `input`.
-      - name: Scan image for vulnerabilities
+      # The CLI, not trivy-action: a `uses:` step cannot loop, and every
+      # platform in the index has to be scanned separately.
+      - name: Install Trivy
         if: inputs.push || inputs.scan
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
         with:
           version: v0.74.0
-          trivy-config: ${{ runner.temp }}/trivy.yaml
-          input: ${{ runner.temp }}/layout
-          severity: ${{ steps.severity.outputs.severity }}
-          ignore-unfixed: true
-          exit-code: "1"
-          format: table
-          trivyignores: ${{ inputs.trivyignores }}
+
+      # `--platform` is accepted but silently ignored for `--input`, so each
+      # platform is scanned with index.json rewritten to name only that one.
+      - name: Scan every platform for vulnerabilities
+        if: inputs.push || inputs.scan
+        env:
+          SEVERITY: ${{ steps.severity.outputs.severity }}
+        run: |-
+          set -euo pipefail
+          layout="${RUNNER_TEMP}/layout"
+          index="${layout}/index.json"
+
+          scan() {
+            trivy image \
+              --config "${RUNNER_TEMP}/trivy.yaml" \
+              --input "${layout}" \
+              --severity "${SEVERITY}" \
+              --ignore-unfixed \
+              --exit-code 1 \
+              --format table
+          }
+
+          # No provenance leaves a manifest at the root; anything else an index.
+          # `unknown/unknown` children are buildkit's attestation manifests.
+          root_media=$(jq -r '.manifests[0].mediaType' "${index}")
+          children='[]'
+          if [[ "${root_media}" == "application/vnd.oci.image.index.v1+json" ]]; then
+            root=$(jq -r '.manifests[0].digest' "${index}" | sed 's/^sha256://')
+            children=$(jq -c '[.manifests[] | select((.platform.os // "unknown") != "unknown")]' \
+              "${layout}/blobs/sha256/${root}")
+          fi
+          count=$(jq 'length' <<< "${children}")
+
+          if [[ "${count}" -le 1 ]]; then
+            echo "Single-platform layout."
+            scan
+            exit 0
+          fi
+
+          # Restored on any exit: the push reads this file back.
+          cp "${index}" "${index}.orig"
+          trap 'mv -f "${index}.orig" "${index}"' EXIT
+
+          failed=()
+          for i in $(seq 0 $((count - 1))); do
+            manifest=$(jq -c ".[${i}]" <<< "${children}")
+            platform=$(jq -r '[.platform.os, .platform.architecture, (.platform.variant // empty)] | join("/")' <<< "${manifest}")
+
+            jq -n --argjson m "${manifest}" \
+              '{schemaVersion: 2, mediaType: "application/vnd.oci.image.index.v1+json", manifests: [$m]}' \
+              > "${index}"
+
+            echo "::group::Scanning ${platform}"
+            if scan; then
+              echo "${platform}: clean"
+            else
+              echo "::error title=Scan::${platform} has findings at ${SEVERITY}"
+              failed+=("${platform}")
+            fi
+            echo "::endgroup::"
+          done
+
+          if [[ ${#failed[@]} -gt 0 ]]; then
+            echo "::error title=Scan::findings on ${#failed[@]} of ${count} platforms: ${failed[*]}"
+            exit 1
+          fi
+          echo "All ${count} platforms scanned clean at ${SEVERITY}."
 
       # Pinned: 2.x and 3.x write the signature in different places.
       - name: Install Cosign

@@ -151,8 +151,8 @@ jobs:
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
-  # An index, not a manifest: the coverage warning fires and syft describes
-  # the first platform only.
+  # An index, not a manifest: QEMU, the scan loop running once per platform,
+  # and the SBOM warning.
   multi-platform:
     name: Multi-platform index
     needs: shared

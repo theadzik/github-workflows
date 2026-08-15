@@ -156,8 +156,8 @@ component, the build fails. Attesting such a document would be worse than
 attesting nothing.
 
 syft needs to be told the platform. It defaults to `linux/amd64` and fails on a
-layout that does not contain it. The step passes the first platform in the list.
-Trivy does not need this; it reads the layout's own platform.
+layout that does not contain it. The step passes the first platform in the list,
+which is why the SBOM covers one platform. See below.
 
 ## Signing and attestation
 
@@ -211,13 +211,85 @@ The digest is unchanged, so the referrers attached to it stay findable.
 
 ## Multi-platform builds
 
-Multi-platform is allowed. Coverage is not complete.
+### Every platform is scanned
 
-Trivy scans one platform of the index. syft describes one platform. The other
-platforms are signed without a scan and without an SBOM.
+`trivy image --input` scans **one** platform of a multi-platform index.
 
-This is accepted, not blocked. A build that opts in prints a warning, so the gap
-appears in the log of every affected run.
+So a single scan of a two-platform index checks one image and signs two. That was
+measured, not supposed. A layout with a clean amd64 image and an arm64 image
+carrying `lodash@4.17.11` scanned clean and exited 0. The same arm64 image alone
+reported four CVEs, one of them CRITICAL.
+
+### Why not `trivy image --platform`
+
+Trivy does have a `--platform` flag. It does not work here, and it fails in the
+worst possible way: it is accepted, it prints no warning, and it changes nothing.
+
+Read the architecture Trivy reports back in
+`.Metadata.ImageConfig.architecture`, rather than guessing from the findings:
+
+| Target | Asked for | Actually scanned |
+| --- | --- | --- |
+| `--input <oci-layout>` | `linux/amd64` | amd64 |
+| `--input <oci-layout>` | `linux/arm64` | **amd64** |
+| registry image | `linux/amd64` | amd64 |
+| registry image | `linux/arm64` | arm64 |
+
+The flag resolves a platform out of a *remote* index. It does nothing for a
+layout on disk.
+
+A workflow built on it would therefore loop over platforms, print a clean result
+for each, and scan amd64 every time. That is worse than not looping at all,
+because the log would say the opposite of what happened.
+
+Using it would mean pushing the index first and scanning it from the registry.
+That breaks the rule this whole design exists for: nothing unscanned reaches the
+registry.
+
+Do not replace the rewrite loop with `--platform` without re-running that table.
+
+The workflow therefore scans each platform on its own. For each child manifest in
+the index it rewrites `index.json` to name only that manifest, runs Trivy against
+the layout, and moves on. The blobs never move. Only the index changes, and the
+original is restored when the loop ends, because the push reads it back.
+
+Findings on any platform fail the build. The loop does not stop at the first one,
+so a run reports every affected platform instead of one at a time.
+
+This is why the scan uses the Trivy CLI rather than `aquasecurity/trivy-action`.
+A `uses:` step cannot run in a loop. The action's `trivyignores` handling is
+replaced by the resolution in `Write the Trivy configuration`, which applies the
+same rules and prints the file it settled on.
+
+Three layout shapes reach the loop, and all three are handled:
+
+| Build | Root of `index.json` | Treated as |
+| --- | --- | --- |
+| `push: false`, no provenance | image manifest | one platform |
+| One platform with provenance | index, one child | one platform |
+| Several platforms | index, several children | one scan per child |
+
+Children whose platform is `unknown/unknown` are skipped. Those are buildkit's
+attestation manifests, not images.
+
+### QEMU
+
+A cross-platform `RUN` needs emulation. Without it the build fails with
+`exec format error`.
+
+`docker/setup-qemu-action` runs whenever `platforms` is anything other than
+`linux/amd64`. A native-only build skips it, because there it costs time and
+does nothing.
+
+### The SBOM still covers one platform
+
+syft is given the first platform in the list. The attested SBOM therefore
+describes that platform only.
+
+An index built for several platforms carries one signed SBOM, and that SBOM does
+not describe the other images under it. The build warns when this applies.
+
+This is the remaining gap in multi-platform coverage. The scan no longer has one.
 
 ## Pinned tools
 
@@ -233,6 +305,10 @@ default cannot read the layout this workflow builds. `provenance: mode=max`
 makes the layout root an image *index*, and v1.42.3 rejects it with
 `unexpected media type ... image.index.v1+json`. Check any new version against a
 layout with attestations before you raise it.
+
+`trivy` is installed by `aquasecurity/setup-trivy` with an explicit `version`,
+because the scan is a CLI loop rather than an action. Raising it changes what the
+gate catches, so raise it deliberately.
 
 `oras` is installed by `oras-project/setup-oras`, pinned by SHA, with an
 explicit `version`. That action carries the SHA256 of each official release and

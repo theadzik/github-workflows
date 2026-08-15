@@ -15,7 +15,7 @@ The workflow file carries short comments only. The reasons are here.
 | --- | --- | --- |
 | `fixtures/clean` | Every scenario that must pass | A real OS layer. Trivy needs a package database, and the SBOM step fails the build when syft reports no operating-system component. |
 | `fixtures/build-args` | `build-args` | The `RUN` is the assertion. Args that never arrive leave the variables empty and fail the build. There are two, because the input is newline-separated. |
-| `fixtures/cross` | `linux/arm64`, and the multi-platform index | No `RUN`. The workflow sets up buildx but not QEMU, so a cross build can copy layers but cannot execute them. |
+| `fixtures/cross` | `linux/arm64`, and the multi-platform index | The `RUN` is the assertion. It fails with `exec format error` without QEMU, so a green run proves emulation works, and it checks that `uname -m` matches the requested `TARGETARCH`. |
 | `fixtures/vulnerable` | Every scan scenario | Carries `lodash@4.17.11` in `node_modules`. CVE-2019-10744 is CRITICAL and fixed in 4.17.12, so it survives `ignore-unfixed`. |
 | `trivyignore/*` | `trivyignores`, both forms | One YAML file with a reason and an expiry. Two plain files, where only the second suppresses anything. |
 
@@ -43,7 +43,7 @@ from clean.
 | `build-only` | `push: false`, plus `extra-scan-severity` and `timeout-minutes`. |
 | `every-optional-input` | `build-args`, several `tags`, `git-ref`, `fetch-depth: 0`, `extra-registry` login. |
 | `arm64` | One platform that is not the default. This is the case syft gets wrong when left to pick. |
-| `multi-platform` | The coverage warning, an index push, and syft describing the first platform. |
+| `multi-platform` | The SBOM coverage warning, an index push, QEMU, and the per-platform scan loop running more than once. |
 | `scan-disabled` | `scan: false` against the vulnerable fixture. Built, never pushed, because `scan: false` applies only when `push` is `false`. |
 | `trivyignore-yaml` / `trivyignore-plain` | Both accepted forms of `trivyignores`. |
 | `published` | The `digest` and `image-ref` outputs, the signature, the referrers and the tag. Checked from outside, against what `defaults` left in the registry. |
