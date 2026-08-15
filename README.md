@@ -1,79 +1,41 @@
 # github-workflows
 
-Reusable GitHub Actions workflows shared across [theadzik](https://github.com/theadzik)'s
-repositories. This repository is public so that public callers can use it; a private
-reusable workflow is only callable from private repositories owned by the same user.
+Reusable GitHub Actions workflows shared across
+[theadzik](https://github.com/theadzik)'s repositories. This repository is public
+so that public callers can use it. A private reusable workflow can only be called
+from private repositories owned by the same user.
 
 ## `build-and-push.yaml`
 
-Builds a container image once into an OCI layout, scans it there, and only then pushes
-it — by digest, then signs and attests that digest, and publishes tags last.
+Builds a container image into an OCI layout on disk. Scans it there. Pushes it by
+digest, signs it, attests it, and publishes the tags last.
 
 ```text
-build → OCI layout on disk → Trivy → push by digest (no tag)
-      → cosign sign → attest SBOM → attest provenance → cosign verify → publish tags
+build → OCI layout on disk → Trivy scan
+      → push by digest (no tag) → cosign sign
+      → attest SBOM → attest provenance → cosign verify → publish tags
 ```
 
-**Nothing unscanned reaches the registry.** The build exports to `type=oci` on disk and
-Trivy scans the layout in place. A finding fails the job before a single byte is pushed.
-The same exporter serves pull requests, which simply never push what they built.
+Four rules hold, whatever the caller passes:
 
-**The scan configures itself.** Trivy discovers three files in the working directory, and
-that directory is the caller's checked-out repository — so each is a way to reconfigure the
-scan gating that caller's own publish, with no input set and nothing in the log naming the
-file. All three are pinned to files this workflow writes outside the workspace:
+1. **Nothing unscanned reaches the registry.** The scan runs while the image is
+   still on disk. A finding fails the job before anything is pushed.
+2. **The caller cannot reconfigure the scan.** Trivy looks for three
+   configuration files in the working directory, which is the caller's own
+   repository. All three are pinned to files this workflow writes.
+3. **HIGH and CRITICAL are a floor.** A caller can widen the gate. No input makes
+   it smaller.
+4. **A tag appears only after the signature does.** An image with no tag cannot
+   be selected by ArgoCD Image Updater, so it is inert until the last step.
 
-| Discovered | What a committed one does | Verified against |
-| --- | --- | --- |
-| `trivy.yaml` | `scan.skip-dirs` over the path holding a vulnerable package turns a blocked build into a passing one. | `tests/fixtures/vulnerable` |
-| `.trivyignore` | Trivy's default `ignorefile`. Suppresses whatever it lists. | Same fixture — all four of its CVEs scanned clean. |
-| `trivy-secret.yaml` | Trivy's default `secret.config`. `disable-rules: [private-key]` makes the secret scanner a no-op while the log still shows it enabled. | An image carrying an RSA private key. |
-
-`.trivyignore.yaml` is *not* discovered this way — it applies only when named — so it needs
-no pin. What a caller can influence is the set of inputs below and nothing else. Callers who
-need an acceptance have `trivyignores`, which still overrides the pinned default, because an
-acceptance this workflow was told about is a decision on record; one it was not told about
-is not found at all.
-
-**An end-of-life base fails the build.** A distribution that has stopped issuing security
-updates is the one case where an empty report means Trivy has nothing to *report* rather
-than nothing to find — an EOL Alpine scans clean and exits 0. `exit-on-eol` turns that into
-a failure, so the base image has to be one that can still be patched.
-
-**One artifact all the way through.** The digest comes from the layout's `index.json` —
-the digest that will exist in the registry, byte for byte. The scan, the push, the
-signature and both attestations all reference it. Nothing is rebuilt or re-exported in
-between.
-
-**The tag is the gate.** ArgoCD Image Updater discovers images by listing tags, so an
-image pushed at its digest with no tag is inert: nothing can select it. `regctl` does
-that push — `docker buildx imagetools create` refuses to run without `--tag` and skopeo
-rejects a digest destination, so it is the one tool here that reproduces what buildkit's
-`push-by-digest` exporter used to do. Tags go up last, via `imagetools create`, which
-re-pushes the same manifest under each tag rather than wrapping it in a new index, so
-the digest is unchanged and the referrers attached to it stay findable.
-
-**Signed, not just attested.** `actions/attest` produces signed statements *about* the
-image; `cosign sign` produces a signature *on* it, which is what Kyverno's
-`verifyImageSignatures` looks for. Both use the same keyless workflow identity. The
-signature is verified before any tag is published, so an identity the cluster would refuse
-fails the build instead of the rollout.
-
-That verification names one signer and nothing else:
-
-```text
-^https://github\.com/theadzik/github-workflows/\.github/workflows/build-and-push\.yaml@.+$
-```
-
-Keyless signing puts the *called* workflow's `job_workflow_ref` in the certificate, so the
-identity is this file regardless of which repository triggered the build. Only the ref
-after `@` is open, because callers pin different commits. Renaming or moving this workflow
-changes the identity and this pattern with it.
+[**docs/how-it-works.md**](docs/how-it-works.md) explains each of these, and the
+smaller decisions behind them. Read it before you change the workflow — the file
+itself carries short comments only.
 
 ### Usage
 
-The caller owns every registry detail — where to publish, who to authenticate as, and with
-which credential. This workflow has no knowledge of any particular registry.
+The caller owns every registry detail: where to publish, who to authenticate as,
+and with which credential. This workflow knows nothing about any registry.
 
 ```yaml
 jobs:
@@ -89,7 +51,7 @@ jobs:
       registry: ghcr.io
       image-name: theadzik/my-image
       registry-username: ${{ github.actor }}
-      # Logged into for base image pulls only; nothing is published there.
+      # Logged into for base image pulls only. Nothing is published there.
       extra-registry: dhi.io
       extra-registry-username: ${{ vars.DOCKERHUB_USERNAME }}
       tags: |
@@ -101,34 +63,36 @@ jobs:
       EXTRA_REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
 ```
 
-`image-name` is the whole path under the registry, namespace included, so a registry that
-namespaces differently from its login user needs no special handling here.
+`image-name` is the whole path under the registry, namespace included. A registry
+that namespaces differently from its login user therefore needs no special
+handling.
 
-**The `permissions` block belongs to the caller, and it is not optional.** A called
-workflow cannot hold more than its caller, and one asking for more fails the run at
-startup — both verified rather than assumed. `packages: write` is what a registry
-authenticating with the job token needs; it is inert for any other registry, so the block
-above is the same everywhere.
+**The `permissions` block belongs to the caller, and it is required.** A called
+workflow cannot hold more permission than its caller, and one that asks for more
+fails the run at startup. `packages: write` is what a registry using the job
+token needs. It is inert for any other registry, so the block above works
+everywhere.
 
-Secrets are mapped explicitly rather than inherited, since the names here describe a role
-rather than a provider.
+Secrets are mapped explicitly rather than inherited. The names describe a role,
+not a provider.
 
 ### Inputs
 
 | Input | Default | Description |
 | --- | --- | --- |
+| `registry` | *required* | Registry host to publish to. |
 | `image-name` | *required* | Repository path under the registry, namespace included. |
+| `registry-username` | *required* | User to authenticate to the registry as. |
 | `context-path` | `.` | Docker build context. |
 | `git-ref` | *(triggering ref)* | Ref to check out. |
 | `fetch-depth` | `1` | Checkout depth. Use `0` when the build reads `.git`. |
 | `tags` | `type=raw,value=latest` | `docker/metadata-action` tag spec, one per line. |
 | `build-args` | *(none)* | Build args, one `KEY=value` per line. |
-| `platforms` | `linux/amd64` | Multi-platform is allowed, but Trivy scans only one platform of the index and the rest are signed unscanned. The job warns when you opt in. |
+| `platforms` | `linux/amd64` | Multi-platform is allowed. Trivy and syft cover one platform of the index; the rest are signed unscanned. The job warns when you opt in. |
 | `push` | `true` | `false` builds and scans only, for pull requests. |
-| `scan` | `true` | Fail on fixable findings. Only honoured when `push` is `false` — the gate is `push \|\| scan`, so nothing is ever pushed unscanned. |
-| `extra-scan-severity` | *(none)* | Severities to fail on *besides* HIGH and CRITICAL — `UNKNOWN`, `LOW`, `MEDIUM`, comma-separated. HIGH/CRITICAL are a floor, so this can only widen the gate; naming them here fails the run. |
-| `registry` | *required* | Registry host to publish to. |
-| `registry-username` | *required* | User to authenticate to the registry as. |
+| `scan` | `true` | Fail on fixable findings. Applies only when `push` is `false`. The gate is `push \|\| scan`, so nothing is ever pushed unscanned. |
+| `extra-scan-severity` | *(none)* | Severities to fail on as well as HIGH and CRITICAL: `UNKNOWN`, `LOW`, `MEDIUM`, comma-separated. Naming HIGH or CRITICAL fails the run. |
+| `trivyignores` | *(none)* | Path to a Trivy ignore file, relative to the caller's repository. One `.trivyignore.yaml`, or a comma-separated list of plain `.trivyignore` files. Prefer the YAML form: it carries `expired_at` and `statement`. |
 | `extra-registry` | *(none)* | Further registry to log in to, for base image pulls. Nothing is published there. |
 | `extra-registry-username` | *(none)* | User to authenticate to `extra-registry` as. |
 | `timeout-minutes` | `30` | Job timeout. |
@@ -137,7 +101,7 @@ rather than a provider.
 
 | Output | Description |
 | --- | --- |
-| `digest` | Digest of the image that was built, scanned and — when `push` is `true` — signed and tagged. |
+| `digest` | Digest of the image that was built and scanned, and — when `push` is `true` — signed and tagged. |
 | `image-ref` | Image reference without a tag. |
 
 ### Secrets
@@ -147,60 +111,34 @@ rather than a provider.
 | `REGISTRY_PASSWORD` | *required* — password or token for `registry-username`. |
 | `EXTRA_REGISTRY_PASSWORD` | Password or token for `extra-registry-username`. |
 
-### Pinned tools
-
-`oras` pushes the built layout to a digest, which nothing already on the runner can do:
-`docker buildx imagetools create` refuses to run without `--tag`, and skopeo rejects a
-digest destination outright. It is installed with `oras-project/setup-oras`, pinned by
-SHA and asked for a specific `version`. That action carries the SHA256 of each official
-release and fails on a mismatch, so pinning the action by commit pins the binary as well.
-
-`cosign` is pinned via the installer's `cosign-release` input rather than left to its
-default. cosign 3.x writes the signature as an OCI referrer carrying the predicate
-`https://sigstore.dev/cosign/sign/v1`; 2.x wrote a classic simple-signing
-`sha256-<digest>.sig` tag. Which of the two an admission controller accepts is worth
-confirming against the cluster rather than inheriting from an installer default that can
-change. Dependabot does not track this input either.
-
 ## Testing
 
-[`test-build-and-push.yaml`](.github/workflows/test-build-and-push.yaml) runs on any pull
-request that touches `build-and-push.yaml`, the test workflow itself, or `tests/`, and can
-be dispatched by hand against any branch. It calls `build-and-push.yaml` the way a caller
-does, once per scenario — `uses: ./` resolves to the copy on the pull request's own
-merge ref, so what runs is the change under review rather than what is already on `main`.
+[`test-build-and-push.yaml`](.github/workflows/test-build-and-push.yaml) runs on
+any pull request that touches `build-and-push.yaml`, the test workflow itself, or
+`tests/`. It can also be dispatched by hand against any branch.
 
-Between them the scenarios cover every input, both values of every boolean, and every
-conditional step: defaults with a full publish, `push: false`, `scan: false`, both forms of
-`trivyignores`, build args, multiple tags, an explicit ref, a full-history checkout, an
-extra registry login, a single non-amd64 platform, and a multi-platform index. A final job
-verifies the signature, the referrers and the tag from outside the build, against the
-digest the workflow reported.
+It calls `build-and-push.yaml` the way a caller does, once per scenario. `uses: ./`
+resolves to the copy on the pull request's merge ref, so what runs is the change
+under review.
 
-Only paths a passing run can reach are covered. A job calling a reusable workflow may not
-set `continue-on-error`, so a scenario meant to fail can only report failure — which leaves
-every guard that *fails* a build untested, the scan gate included. A fork's pull request
-cannot grant `id-token: write` at all, so it skips every scenario and says so rather than
-reporting a quiet green; dependabot's can, and does.
+A fork's pull request cannot grant `id-token: write`, so it skips every scenario
+and says so. It does not report a quiet green. Dependabot's runs can grant it, so
+they run.
 
-The images the scenarios publish are deleted at the end of the same run, signatures and
-attestations included, leaving one `latest` version behind so the package — and the Actions
-access grant that lets the job delete anything at all — survives between runs.
-
-[`tests/README.md`](tests/README.md) documents the fixtures, what each scenario covers, and
-the two paths a green run cannot reach.
+[`tests/README.md`](tests/README.md) lists the fixtures, what each scenario
+covers, and the paths a green run cannot reach.
 
 ## Versioning
 
-Callers should pin to a commit SHA with the tag in a trailing comment. Dependabot's
-`github-actions` ecosystem updates job-level `uses:` references, so pinned callers get a
-pull request when a new tag is released here.
+Pin to a commit SHA with the tag in a trailing comment. Dependabot's
+`github-actions` ecosystem updates job-level `uses:` references, so pinned callers
+get a pull request when a new tag is released here.
 
 | Tag | Shape |
 | --- | --- |
 | `v2` | Builds to an OCI layout, scans it on disk, then pushes by digest with `oras`. Nothing unscanned reaches the registry. Registry, credentials and namespace all come from the caller. |
 | `v1` | Builds straight into the registry (`push-by-digest`), then scans the pushed digest. Docker Hub assumed throughout. |
 
-`v1` to `v2` is not a pin change. Callers must add `packages: write`, pass `registry` and
-`registry-username`, map `REGISTRY_PASSWORD` instead of inheriting `DOCKERHUB_TOKEN`, and
-move the namespace from the username into `image-name`.
+`v1` to `v2` is not a pin change. Callers must add `packages: write`, pass
+`registry` and `registry-username`, map `REGISTRY_PASSWORD` instead of inheriting
+`DOCKERHUB_TOKEN`, and move the namespace from the username into `image-name`.

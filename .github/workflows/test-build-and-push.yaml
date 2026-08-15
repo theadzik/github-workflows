@@ -1,17 +1,14 @@
 name: Test build-and-push
 
-# Exercises every path through build-and-push.yaml on the pull request that
-# changes it, by calling it the way a caller does. `uses: ./` resolves to the
-# copy on the pull request's own merge ref, so what runs here is the change
-# under review rather than what is already on main.
+# Calls build-and-push.yaml the way a caller does, once per scenario.
+# `uses: ./` runs the copy on the pull request. See tests/README.md.
 on:
   pull_request:
     paths:
       - ".github/workflows/build-and-push.yaml"
       - ".github/workflows/test-build-and-push.yaml"
       - "tests/**"
-  # For a branch the paths above do not match, and for a fork's pull request,
-  # which cannot run the scenarios on its own.
+  # For a branch the paths miss, and for a fork's pull request.
   workflow_dispatch:
 
 concurrency:
@@ -21,33 +18,17 @@ concurrency:
 permissions: {}
 
 jobs:
-  # The values every scenario needs, in the only place they can be shared:
-  # `needs` is the only context a called workflow's `with:` can read besides
-  # `github`, so a constant either lives in a job output or is written out ten
-  # times and drifts.
+  # A called workflow's `with:` can read only `needs` and `github`, so every
+  # shared constant has to be a job output.
   shared:
     name: Shared values
     runs-on: ubuntu-latest
     outputs:
-      # Which image the scenarios publish to, and which ref the one scenario
-      # that checks out an explicit commit should use.
       image: theadzik/github-workflows-test
       head-sha: ${{ github.event.pull_request.head.sha || github.sha }}
 
-      # The one thing here that is a decision, and it comes out true for
-      # everything except a fork's pull request. A called workflow cannot hold
-      # more permission than its caller, this one needs `id-token: write` for
-      # keyless signing even when it is only building, and a fork's token is
-      # capped at read-only however the caller's `permissions:` block is
-      # written. Those runs skip instead of going red, and `result` says the run
-      # tested nothing rather than reporting a quiet green.
-      #
-      # Dependabot's are not excluded. Its runs are treated like a fork's -
-      # read-only token, no repository secrets - but scopes named explicitly in
-      # a `permissions:` block are still granted, and every scenario below names
-      # all five. Nothing here reads a repository secret; `secrets.GITHUB_TOKEN`
-      # is the job token and is always present. Action bumps are the change this
-      # workflow most needs to test, so they run.
+      # False only for a fork's pull request, which cannot grant
+      # `id-token: write`. Dependabot can, so it is not excluded.
       can-run: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - name: Report whether the scenarios can run
@@ -66,18 +47,9 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-  # ---------------------------------------------------------------------------
-  # The scenarios. Between them they cover every input, both values of every
-  # boolean, and every conditional step a passing run can reach.
-  #
-  # Every path here is one a green run proves. A job that calls a reusable
-  # workflow may not set `continue-on-error` - the schema rejects it - so a
-  # scenario that is supposed to fail can only ever report failure. The guards
-  # that fail a build are therefore not tested: see tests/README.md.
-  # ---------------------------------------------------------------------------
+  # The scenarios. Only paths a green run can prove; see tests/README.md.
 
-  # Nothing but the required inputs: default tags, platform, scan, push, depth,
-  # and no ignore or extra registry. The whole publishing chain runs.
+  # Required inputs only. The whole publishing chain runs.
   defaults:
     name: Defaults, full publish
     needs: shared
@@ -97,17 +69,8 @@ jobs:
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
-  # What a caller's own pull request runs: build and scan, publish nothing. Also
-  # carries the two inputs that have no other home - a widened severity and a
-  # shortened timeout.
-  #
-  # The severity value is lowercase, spaced and two-item on purpose: between
-  # them those cover the case folding, the whitespace stripping and the splitter
-  # in `Resolve scan severities`, which a single bare `MEDIUM` would not. It
-  # cannot assert that MEDIUM findings now fail the build - nothing that fails
-  # is testable here - only that a widened list is accepted and scanned with.
-  # The clean fixture has no fixable finding at any severity today, so this adds
-  # coverage without adding a way for the scenario to go red.
+  # A caller's own pull request: build and scan, publish nothing. The severity
+  # value is lowercase and spaced on purpose - it tests the parser.
   build-only:
     name: push false, build and scan only
     needs: shared
@@ -133,13 +96,8 @@ jobs:
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
-  # Build args, several tags, an explicit ref and a full-history checkout, and a
-  # second registry logged into for base image pulls. The fixture's Dockerfile
-  # fails the build if the args do not arrive.
-  #
-  # The extra registry is ghcr.io again: the branch under test is the login
-  # step, not the host, and a second real registry would mean a second real
-  # credential for a test image nothing pulls.
+  # The fixture's Dockerfile fails the build if the args do not arrive.
+  # The extra registry is ghcr.io again: the login step is what is under test.
   every-optional-input:
     name: Build args, tags, ref, extra registry
     needs: shared
@@ -171,8 +129,7 @@ jobs:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
       EXTRA_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
-  # A single platform that is not the default, which is the case syft gets
-  # wrong when it is left to pick for itself.
+  # One non-default platform - the case syft gets wrong on its own.
   arm64:
     name: linux/arm64 only
     needs: shared
@@ -194,8 +151,8 @@ jobs:
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
-  # An index rather than a manifest: the coverage warning fires, syft describes
-  # the first platform only, and the tags are published against the index digest.
+  # An index, not a manifest: the coverage warning fires and syft describes
+  # the first platform only.
   multi-platform:
     name: Multi-platform index
     needs: shared
@@ -217,11 +174,8 @@ jobs:
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
-  # The vulnerable fixture, allowed through only because scanning is off. It is
-  # built and never pushed - which is not a coincidence but the input's whole
-  # shape: the gate is `push || scan`, so `scan: false` is only honoured on a
-  # run that publishes nothing. Pushing this fixture would scan it and fail,
-  # whatever `scan` said.
+  # `scan: false` only works with `push: false`, so this fixture is built and
+  # never published.
   scan-disabled:
     name: scan false
     needs: shared
@@ -243,15 +197,8 @@ jobs:
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
-  # The YAML ignore form: one file, carrying a reason and an expiry. `push` is
-  # false and `scan` is left at its default, which is the combination that scans
-  # without publishing - so the ignore file is genuinely read.
-  #
-  # No severity input. These scenarios used to narrow to CRITICAL so that the
-  # fixture's one CRITICAL was all the scan considered; HIGH is a floor now, so
-  # the ignore file has to account for every fixable HIGH in the fixture as
-  # well. See tests/README.md - that list needs re-checking when lodash gains a
-  # new one.
+  # The YAML ignore form. `push: false` with `scan` defaulted scans without
+  # publishing, so the ignore file is read. See tests/README.md.
   trivyignore-yaml:
     name: trivyignores, YAML form
     needs: shared
@@ -273,8 +220,7 @@ jobs:
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
-  # The plain form, as a comma-separated list. The file that suppresses the
-  # finding is listed second on purpose.
+  # The plain form. The file that suppresses anything is listed second.
   trivyignore-plain:
     name: trivyignores, plain form, two files
     needs: shared
@@ -296,12 +242,8 @@ jobs:
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
-  # ---------------------------------------------------------------------------
-  # What the publishing scenario actually left in the registry. The workflow
-  # verifies its own signature before tagging; this checks the same thing from
-  # outside, against the digest it reported, which is also the only test of its
-  # outputs.
-  # ---------------------------------------------------------------------------
+  # What the `defaults` scenario left in the registry, checked from outside.
+  # Also the only test of the workflow's outputs.
   published:
     name: Verify what was published
     needs: [shared, defaults]
@@ -363,12 +305,10 @@ jobs:
         run: |-
           set -euo pipefail
           oras discover --format json "${IMAGE_REF}@${DIGEST}" > referrers.json
-          # `referrers` since oras 1.2, `manifests` before it; the installer
-          # tracks the action's default version rather than a pin.
+          # `referrers` since oras 1.2, `manifests` before it.
           jq -r '(.referrers // .manifests // [])[] | "\(.artifactType)\t\(.digest)"' referrers.json
           count=$(jq '(.referrers // .manifests // []) | length' referrers.json)
-          # One cosign signature and two sigstore bundles - the SBOM and the
-          # provenance that actions/attest pushed to the registry.
+          # One cosign signature, plus the SBOM and provenance bundles.
           if [[ "${count}" -lt 3 ]]; then
             echo "::error title=Referrers::expected at least 3 referrers, found ${count}"
             exit 1
@@ -380,9 +320,7 @@ jobs:
           IMAGE_REF: ${{ needs.defaults.outputs.image-ref }}
         run: |-
           set -euo pipefail
-          # `latest` because the publishing scenario takes the default tag spec.
-          # Concurrent runs on other branches would move it; the concurrency
-          # group only covers this one.
+          # `latest` because the `defaults` scenario takes the default tag spec.
           tagged=$(docker buildx imagetools inspect "${IMAGE_REF}:latest" --format '{{ .Manifest.Digest }}')
           if [[ "${tagged}" != "${DIGEST}" ]]; then
             echo "::error title=Tags::latest points at ${tagged}, the build reported ${DIGEST}"
@@ -390,13 +328,8 @@ jobs:
           fi
           echo "latest -> ${DIGEST}"
 
-  # The scenarios publish four throwaway images per run, and nothing reads them
-  # once `published` has had its look. They are deleted here rather than at pull
-  # request close: they are junk the moment the run ends, and a manually
-  # dispatched run has no close event to hang cleanup on.
-  #
-  # Runs even when a scenario failed - a build that failed after pushing still
-  # left tags behind.
+  # Deletes this run's throwaway images. Runs even when a scenario failed,
+  # because a build that died after pushing still left tags behind.
   cleanup:
     name: Delete this run's images
     needs: [shared, defaults, every-optional-input, arm64, multi-platform, published]
@@ -414,25 +347,19 @@ jobs:
         run: |-
           set -euo pipefail
 
-          # Owner and package name are split out of the one string the scenarios
-          # published to, rather than spelled out again here. A second copy
-          # could drift from it, and this job deletes untagged versions older
-          # than six hours: aimed at the wrong package, that is somebody's
-          # signatures and attestations.
+          # Split from the one string the scenarios published to. A second copy
+          # could drift, and this job deletes things.
           OWNER="${IMAGE%%/*}"
           PACKAGE="${IMAGE#*/}"
           if [[ "${OWNER}" == "${IMAGE}" || -z "${PACKAGE}" ]]; then
             echo "::error title=Cleanup::cannot split '${IMAGE}' into an owner and a package name"
             exit 1
           fi
-          # ghcr allows a nested path, which the REST API takes as one encoded
-          # name while the registry API takes it as written.
+          # The REST API wants a nested path encoded; the registry API does not.
           PACKAGE_PATH="${PACKAGE//\//%2F}"
 
-          # gh prints the error body to stdout and exits non-zero, so a failure
-          # has to be caught here rather than fed to jq: iterating an error
-          # object yields its values, and the run would report "nothing to
-          # delete" for what is really a permission problem.
+          # gh prints the error body to stdout, so an unchecked failure would
+          # read as "nothing to delete" when it is really a permission problem.
           if ! versions=$(gh api --paginate "/users/${OWNER}/packages/container/${PACKAGE_PATH}/versions" 2>"${RUNNER_TEMP}/gh-error"); then
             if grep -q '(HTTP 404)' "${RUNNER_TEMP}/gh-error"; then
               echo "No ${PACKAGE} package in ghcr.io; nothing to delete"
@@ -445,11 +372,8 @@ jobs:
 
           id_of() { jq -r --arg d "$1" 'map(select(.name == $d)) | first | .id // empty' <<< "${versions}"; }
 
-          # The signature and both attestations are separate untagged versions
-          # pointing at the image digest. They have to be resolved from the
-          # registry while the manifest they hang off still exists, and they are
-          # what turns "delete the tag" into a package that does not fill up
-          # with orphans. Best effort: losing them costs a few blobs.
+          # Signature and attestations are separate untagged versions. Resolve
+          # them while the manifest they hang off still exists. Best effort.
           ghcr_token=$(curl -fsSL -u "${OWNER}:${GH_TOKEN}" \
             "https://ghcr.io/token?service=ghcr.io&scope=repository:${OWNER}/${PACKAGE}:pull" \
             | jq -er .token) || ghcr_token=""
@@ -460,11 +384,8 @@ jobs:
               | jq -r '.manifests[]?.digest' || true
           }
 
-          # `latest` is the one thing kept. It is the publishing scenario's tag,
-          # overwritten by every run, and keeping a version alive keeps the
-          # package alive - a package deleted down to nothing comes back on the
-          # next push without the Actions access grant that makes any of this
-          # possible.
+          # `latest` is kept: a package deleted down to nothing loses the
+          # Actions access grant that lets this job delete anything.
           keep=()
           latest=$(jq -r 'map(select((.metadata.container.tags // []) | index("latest"))) | first | .name // empty' <<< "${versions}")
           if [[ -n "${latest}" ]]; then
@@ -474,9 +395,8 @@ jobs:
             done
           fi
 
-          # Every tag this run published carries its run id, so a concurrent run
-          # on another branch is never in scope - including the case where an
-          # identical build resolved to a digest both runs tagged.
+          # Every tag this run published carries its run id, so a concurrent
+          # run on another branch is never in scope.
           doomed=()
           for digest in $(jq -r --arg run "${RUN_ID}" \
             '.[] | select((.metadata.container.tags // []) | any(test("-" + $run + "(-|$)"))) | .name' <<< "${versions}"); do
@@ -486,8 +406,7 @@ jobs:
             done
           done
 
-          # Orphans from a run that died between pushing and cleaning up. Only
-          # once they are old enough that no run in flight can still want them.
+          # Orphans from a run that died mid-way, once no run can still want them.
           cutoff=$(date -u -d '6 hours ago' +%Y-%m-%dT%H:%M:%SZ)
           while read -r id; do
             [[ -n "${id}" ]] && doomed+=("${id}")
@@ -542,16 +461,13 @@ jobs:
           set -euo pipefail
           jq -r 'to_entries[] | "\(.value.result)\t\(.key)"' <<< "$RESULTS" | sort
 
-          # Every scenario needs `id-token: write`, so an event that cannot
-          # grant it leaves nothing to report. Said out loud rather than passed
-          # silently: a green check here means "not tested", not "tested".
+          # Nothing ran, so say so. A green check here means "not tested".
           if [[ "${CAN_RUN}" != "true" ]]; then
             echo "::warning title=Tests::nothing ran - this event cannot grant id-token: write. Re-run manually against the branch."
             exit 0
           fi
 
-          # Otherwise every job was meant to run, so anything short of success -
-          # failed, cancelled or skipped - is a problem.
+          # Every job was meant to run, so skipped and cancelled are failures too.
           if jq -e 'to_entries | any(.value.result != "success")' <<< "$RESULTS" > /dev/null; then
             echo "::error title=Tests::at least one scenario did not succeed"
             exit 1
