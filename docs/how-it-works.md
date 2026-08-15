@@ -247,6 +247,33 @@ Verification covers the same five digests, for the reason the rest of this page
 keeps repeating: a child that failed to sign would otherwise be found by the
 cluster rather than by the build.
 
+### The attestations are verified too
+
+`cosign verify-attestation` reads both attestations back from the registry
+before any tag is published. A malformed or missing one fails the build instead
+of the rollout.
+
+The predicate types have to match exactly, and the shorthands are not
+interchangeable:
+
+| Document | `actions/attest` writes | cosign shorthand |
+| --- | --- | --- |
+| CycloneDX | `https://cyclonedx.org/bom` | `cyclonedx` |
+| SLSA provenance | `https://slsa.dev/provenance/v1` | `slsaprovenance1` |
+| SPDX | `https://spdx.dev/Document/v<version>` | none that matches |
+
+The SPDX row is the warning. `actions/attest` appends the document's own version
+to the SPDX type, so cosign's `spdxjson` shorthand — which means
+`https://spdx.dev/Document`, with no version — never matches. A raw URI works
+where a shorthand does not. CycloneDX has no such problem: the action hardcodes
+the type with no version, so `cyclonedx` matches.
+
+Two properties of the SBOM writer are load-bearing here. `actions/attest`
+recognises a CycloneDX document only if it carries `bomFormat`, `serialNumber`
+and `specVersion`, and it rejects anything else outright. Trivy emits all three.
+Checked, because switching the SBOM writer could have broken the attestation
+step rather than the SBOM.
+
 The verification names one signer:
 
 ```text

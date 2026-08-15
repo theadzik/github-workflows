@@ -495,6 +495,26 @@ jobs:
           done
           echo "Verified ${#digests[@]} signature(s)."
 
+      # Both attestations, read back from the registry. A malformed or missing
+      # one would otherwise be found by the cluster instead of by this build.
+      - name: Verify attestations
+        if: inputs.push
+        env:
+          DIGEST: ${{ steps.layout.outputs.digest }}
+          SIGNER_IDENTITY: '^https://github\.com/theadzik/github-workflows/\.github/workflows/build-and-push\.yaml@.+$'
+        run: |-
+          set -euo pipefail
+          # cosign shorthands: https://cyclonedx.org/bom and
+          # https://slsa.dev/provenance/v1, the types actions/attest sets.
+          for type in cyclonedx slsaprovenance1; do
+            cosign verify-attestation \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --certificate-identity-regexp "${SIGNER_IDENTITY}" \
+              --type "${type}" \
+              "${IMAGE_REF}@${DIGEST}" > /dev/null
+            echo "Verified ${type} attestation on ${IMAGE_REF}@${DIGEST}"
+          done
+
       # Last, so the image becomes discoverable only once it is signed.
       # `imagetools create` keeps the digest, so the referrers stay findable.
       - name: Publish tags

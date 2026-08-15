@@ -156,7 +156,16 @@ No input changes. A multi-platform build now produces more signatures than it
 did, and a single-platform build produces two or three instead of one, because
 buildkit's provenance manifests are children too.
 
-### 8. Things that did not change
+### 8. The attestations are verified before any tag is published
+
+v3 adds a `Verify attestations` step. It reads the SBOM and provenance
+attestations back from the registry with `cosign verify-attestation`, and fails
+the build if either is missing or does not verify.
+
+No input changes. A build that produced a broken attestation used to publish
+tags anyway; it now stops.
+
+### 9. Things that did not change
 
 - Every other input keeps its name, type and default.
 - The outputs are unchanged.
