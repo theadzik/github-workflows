@@ -40,7 +40,7 @@ and with which credential. This workflow knows nothing about any registry.
 ```yaml
 jobs:
   build-and-push:
-    uses: theadzik/github-workflows/.github/workflows/build-and-push.yaml@<commit-sha> # v2
+    uses: theadzik/github-workflows/.github/workflows/build-and-push.yaml@<commit-sha> # v3
     permissions:
       contents: read
       id-token: write
@@ -136,9 +136,15 @@ get a pull request when a new tag is released here.
 
 | Tag | Shape |
 | --- | --- |
+| `v3` | Same pipeline as `v2`, but the caller can no longer weaken the scan. HIGH and CRITICAL become a floor, `scan: false` stops applying to a publishing run, and the workflow owns the Trivy configuration instead of reading the caller's. |
 | `v2` | Builds to an OCI layout, scans it on disk, then pushes by digest with `oras`. Nothing unscanned reaches the registry. Registry, credentials and namespace all come from the caller. |
 | `v1` | Builds straight into the registry (`push-by-digest`), then scans the pushed digest. Docker Hub assumed throughout. |
 
-`v1` to `v2` is not a pin change. Callers must add `packages: write`, pass
-`registry` and `registry-username`, map `REGISTRY_PASSWORD` instead of inheriting
-`DOCKERHUB_TOKEN`, and move the namespace from the username into `image-name`.
+A major tag means a caller has to change something, not only move a pin.
+[**docs/upgrading.md**](docs/upgrading.md) has the checklist for each step.
+
+**v2 to v3 in short.** `scan-severity` is removed; use `extra-scan-severity`,
+which only widens the gate. `scan: false` no longer applies when `push` is true.
+A `trivy.yaml`, `.trivyignore` or `trivy-secret.yaml` in the caller's repository
+is no longer read. An end-of-life base image now fails the build. A build that
+passed under v2 can therefore fail under v3 — which is the point of the change.
