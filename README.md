@@ -28,9 +28,9 @@ Four rules hold, whatever the caller passes:
    it smaller.
 4. **A tag appears only after the signature does.** An image with no tag cannot
    be selected by ArgoCD Image Updater, so it is inert until the last step.
-5. **The source is scanned too.** A multi-stage build discards most of its
-   dependencies, so an image scan cannot see them. The build context is scanned
-   from its lock files before the build starts.
+5. **The build context is scanned too.** A multi-stage build discards most of
+   its dependencies, so an image scan cannot see them. The context is scanned
+   before the build, for vulnerable dependencies in lock files and for secrets.
 
 Each published image carries a signature, two SBOMs and a provenance statement.
 [**docs/using-the-artifacts.md**](docs/using-the-artifacts.md) shows what to do
@@ -145,7 +145,7 @@ get a pull request when a new tag is released here.
 
 | Tag | Shape |
 | --- | --- |
-| `v4` | Adds a scan of the build context's lock files, before the build, on the same severity floor and ignore file as the image scan. Its dependency inventory is attested as a second CycloneDX SBOM. |
+| `v4` | Adds a scan of the build context before the build — lock files and secrets — on the same severity floor and ignore file as the image scan. Its dependency inventory is attested as a second CycloneDX SBOM. |
 | `v3` | Same pipeline as `v2`, but the caller can no longer weaken the scan. HIGH and CRITICAL become a floor, `scan: false` stops applying to a publishing run, and the workflow owns the Trivy configuration instead of reading the caller's. Every platform of a multi-platform index is scanned, and QEMU makes a cross-platform `RUN` work. |
 | `v2` | Builds to an OCI layout, scans it on disk, then pushes by digest with `oras`. Nothing unscanned reaches the registry. Registry, credentials and namespace all come from the caller. |
 | `v1` | Builds straight into the registry (`push-by-digest`), then scans the pushed digest. Docker Hub assumed throughout. |
@@ -155,8 +155,9 @@ A major tag means a caller has to change something, not only move a pin.
 
 **v3 to v4 in short.** The build context is now scanned for vulnerable
 dependencies before the image is built, using the same floor and the same
-`trivyignores`. A repository whose lock files carry a fixable HIGH or CRITICAL
-will fail until that finding is fixed or recorded. Nothing else changes.
+`trivyignores`. A repository whose lock files carry a fixable HIGH or CRITICAL,
+or whose context holds a secret, will fail until that finding is fixed or
+recorded. Nothing else changes.
 
 **v2 to v3 in short.** `scan-severity` is removed; use `extra-scan-severity`,
 which only widens the gate. `scan: false` no longer applies when `push` is true.

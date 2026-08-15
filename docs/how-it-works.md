@@ -87,8 +87,14 @@ So the workflow scans both, and the two see different things:
 
 | | Reads | Finds |
 | --- | --- | --- |
-| `trivy fs` on the build context | lock files | build-time dependencies |
-| `trivy image` on the layout | installed packages | what actually ships |
+| `trivy fs` on the build context | lock files, and file contents | build-time dependencies, and secrets |
+| `trivy image` on the layout | installed packages, and file contents | what actually ships, and secrets |
+
+Both scans use the same pinned configuration, which enables the `vuln` and
+`secret` scanners. The build context is therefore a secret gate as well as a
+dependency gate: a private key sitting next to the Dockerfile fails the build
+before the build starts, exactly as one baked into a layer fails it afterwards.
+Measured, not assumed.
 
 Neither is a subset of the other. `tests/fixtures/vulnerable` carries a
 `node_modules` entry with no lock file, and the source scan reports nothing for

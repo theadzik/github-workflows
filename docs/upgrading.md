@@ -15,7 +15,7 @@ uses: theadzik/github-workflows/.github/workflows/build-and-push.yaml@<commit-sh
 
 No inputs change. No cluster change is needed.
 
-### 1. Your lock files are now scanned
+### 1. Your build context is now scanned
 
 A multi-stage build usually throws its dependencies away. If you build with
 `pnpm install` and then copy only the compiled output into a runtime image, the
@@ -26,8 +26,13 @@ Those dependencies still shape what the build produces. v4 therefore runs
 `trivy fs` over `context-path` before the build, using the same HIGH/CRITICAL
 floor, the same `extra-scan-severity`, and the same `trivyignores`.
 
-**A repository with a fixable HIGH or CRITICAL in a lock file will fail on its
-next build.** That finding was always there; nothing was scanning for it.
+The shared configuration enables the `secret` scanner as well as `vuln`, so the
+context is checked for committed credentials at the same time. A private key in
+the build context now fails the build, just as one inside a layer already did.
+
+**A repository with a fixable HIGH or CRITICAL in a lock file, or a secret in
+its build context, will fail on its next build.** Those findings were always
+there; nothing was scanning for them.
 
 Two ways forward, and they are the usual two:
 

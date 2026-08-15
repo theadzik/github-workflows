@@ -261,9 +261,9 @@ jobs:
         with:
           version: v0.74.0
 
-      # The build context, before it is built. `trivy fs` reads lock files; the
-      # image scan reads installed packages, so neither covers the other.
-      - name: Scan source dependencies
+      # Lock files and secrets, before anything is built. The image scan reads
+      # installed packages instead, so neither of the two covers the other.
+      - name: Scan the build context
         if: inputs.push || inputs.scan
         env:
           SEVERITY: ${{ steps.severity.outputs.severity }}
@@ -279,8 +279,13 @@ jobs:
             --table-mode detailed \
             "${CONTEXT}"
 
-          # Only reached when the gate passed, so the document describes a tree
-          # that has no findings this build refused.
+      # Only attested on a publishing run, so only built on one.
+      - name: Generate source SBOM
+        if: inputs.push
+        env:
+          CONTEXT: ${{ inputs.context-path }}
+        run: |-
+          set -euo pipefail
           trivy fs \
             --config "${RUNNER_TEMP}/trivy.yaml" \
             --format cyclonedx \
