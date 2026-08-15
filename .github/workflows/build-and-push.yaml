@@ -62,10 +62,20 @@ on:
         required: false
         type: boolean
         default: true
-      scan-severity:
+      extra-scan-severity:
+        description: |
+          Trivy severities to fail the build on *in addition to* HIGH and
+          CRITICAL, as a comma-separated list. UNKNOWN, LOW and MEDIUM, in any
+          case, with or without spaces.
+
+          HIGH and CRITICAL are a floor rather than a default. There is no input
+          that lowers the gate below them, so a caller can only ever ask this
+          workflow to fail on more than it already does - naming HIGH or
+          CRITICAL here fails the run rather than being ignored, because a
+          caller who writes them is usually trying to narrow the list.
         required: false
         type: string
-        default: "HIGH,CRITICAL"
+        default: ""
       trivyignores:
         description: |
           Repo-relative path to a Trivy ignore file, suppressing findings the
@@ -133,6 +143,47 @@ jobs:
       digest: ${{ steps.layout.outputs.digest }}
       image-ref: ${{ env.IMAGE_REF }}
     steps:
+      # Trivy takes one severity list, so the floor and whatever the caller
+      # added are unioned here rather than in the scan step: an expression there
+      # could only concatenate the two and would hand Trivy a list with HIGH in
+      # it twice, and no expression can reject a value.
+      #
+      # First step in the job, and unconditional. A value Trivy would refuse
+      # should cost seconds rather than a full build, and a caller who thinks
+      # they narrowed the gate should hear about it immediately rather than read
+      # a green run that scanned more than they asked for.
+      - name: Resolve scan severities
+        id: severity
+        env:
+          EXTRA: ${{ inputs.extra-scan-severity }}
+        run: |-
+          set -euo pipefail
+          severities="HIGH,CRITICAL"
+
+          IFS=',' read -ra requested <<< "${EXTRA}"
+          for raw in "${requested[@]}"; do
+            token="${raw//[[:space:]]/}"
+            [[ -z "${token}" ]] && continue
+            token="${token^^}"
+            case "${token}" in
+              UNKNOWN | LOW | MEDIUM)
+                # Naming one twice is a caller's typo, not a reason to fail.
+                [[ ",${severities}," == *",${token},"* ]] || severities="${severities},${token}"
+                ;;
+              HIGH | CRITICAL)
+                echo "::error title=Scan severity::${token} always fails this build. extra-scan-severity adds severities below HIGH; it cannot restate the floor or remove it."
+                exit 1
+                ;;
+              *)
+                echo "::error title=Scan severity::'${raw}' is not a Trivy severity. extra-scan-severity takes UNKNOWN, LOW or MEDIUM."
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "severity=${severities}" >> "$GITHUB_OUTPUT"
+          echo "Fixable findings at ${severities} fail this build."
+
       # Trivy scans one platform out of a multi-platform index, so the platforms
       # beyond the first are signed without having been scanned. Accepted
       # deliberately rather than blocked, but it should be visible in the log of
@@ -307,7 +358,7 @@ jobs:
           version: v0.74.0
           trivy-config: ${{ runner.temp }}/trivy.yaml
           input: ${{ runner.temp }}/layout
-          severity: ${{ inputs.scan-severity }}
+          severity: ${{ steps.severity.outputs.severity }}
           ignore-unfixed: true
           exit-code: "1"
           format: table

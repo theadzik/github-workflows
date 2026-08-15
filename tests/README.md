@@ -34,7 +34,7 @@ what is not covered, below.
 | Scenario | Path through the workflow |
 | --- | --- |
 | `defaults` | Every optional input defaulted, and the whole publish → sign → attest → verify → tag chain. |
-| `build-only` | `push: false`, plus `scan-severity` and `timeout-minutes`. |
+| `build-only` | `push: false`, plus `extra-scan-severity` and `timeout-minutes`. |
 | `every-optional-input` | `build-args`, several `tags`, `git-ref`, `fetch-depth: 0`, `extra-registry` login. |
 | `arm64` | A single platform that is not the default — the case syft gets wrong when left to pick. |
 | `multi-platform` | The coverage warning, an index push, syft describing the first platform. |
@@ -48,19 +48,34 @@ what is not covered, below.
 `continue-on-error` — the workflow schema rejects it — so a scenario meant to fail can only
 ever report failure, and there is no green run that proves it. Every guard in
 `build-and-push.yaml` is therefore untested: the scan failing the build on a fixable
-HIGH/CRITICAL, the SBOM step refusing a document with no operating-system component, the
-push step catching a registry that stored a different digest, and `Publish tags` refusing
-to run when `docker/metadata-action` produced nothing.
+HIGH/CRITICAL, `Resolve scan severities` rejecting `HIGH` or a value that is not a severity,
+the SBOM step refusing a document with no operating-system component, the push step catching
+a registry that stored a different digest, and `Publish tags` refusing to run when
+`docker/metadata-action` produced nothing.
 
 One consequence is worth naming. The `trivyignore-*` scenarios pass when the scan finds
 nothing to report — which is also what a fixture that has quietly stopped being vulnerable
 looks like. If `fixtures/vulnerable` ages out, those two scenarios keep passing and stop
-meaning anything. Checking it by hand is one command:
+meaning anything.
+
+They fail the opposite way too, and that one is new. `HIGH,CRITICAL` is a floor no input can
+narrow, so the ignore files have to list *every* fixable HIGH and CRITICAL in the fixture,
+not just the CVE the fixture exists for. A new lodash advisory turns both scenarios red until
+it is added to `accepted.trivyignore` and `accepted.trivyignore.yaml`, which are meant to
+stay in step with each other.
+
+Both directions are one command:
 
 ```shell
 docker build -t vuln tests/fixtures/vulnerable
-# must exit 1
-trivy image --severity CRITICAL --ignore-unfixed --exit-code 1 vuln
+
+# Must exit 1 — the fixture is still vulnerable.
+trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 vuln
+
+# Must exit 0 — the ignore file still covers all of it. Anything listed here
+# and missing from the file above is what turned the scenarios red.
+trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
+  --ignorefile tests/trivyignore/accepted.trivyignore.yaml vuln
 ```
 
 **The default `context-path`.** Building `.` would mean a `Dockerfile` at the root of a

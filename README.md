@@ -117,7 +117,7 @@ rather than a provider.
 | `platforms` | `linux/amd64` | Multi-platform is allowed, but Trivy scans only one platform of the index and the rest are signed unscanned. The job warns when you opt in. |
 | `push` | `true` | `false` builds and scans only, for pull requests. |
 | `scan` | `true` | Fail on fixable findings. Only honoured when `push` is `false` — the gate is `push \|\| scan`, so nothing is ever pushed unscanned. |
-| `scan-severity` | `HIGH,CRITICAL` | Trivy severities that fail the build. |
+| `extra-scan-severity` | *(none)* | Severities to fail on *besides* HIGH and CRITICAL — `UNKNOWN`, `LOW`, `MEDIUM`, comma-separated. HIGH/CRITICAL are a floor, so this can only widen the gate; naming them here fails the run. |
 | `registry` | *required* | Registry host to publish to. |
 | `registry-username` | *required* | User to authenticate to the registry as. |
 | `extra-registry` | *(none)* | Further registry to log in to, for base image pulls. Nothing is published there. |

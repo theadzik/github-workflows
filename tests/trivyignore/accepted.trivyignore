@@ -1,3 +1,10 @@
 # The plain form, listed second, and the only file in that list that suppresses
 # anything. See decoy.trivyignore.
+#
+# Every fixable HIGH and CRITICAL in the fixture, not just the CRITICAL it
+# exists for: HIGH,CRITICAL is a floor the scenario cannot narrow past, so an
+# unlisted HIGH fails it. Kept in step with accepted.trivyignore.yaml.
 CVE-2019-10744
+CVE-2020-8203
+CVE-2021-23337
+CVE-2026-4800

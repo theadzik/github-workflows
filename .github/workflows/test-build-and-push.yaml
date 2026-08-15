@@ -98,8 +98,16 @@ jobs:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
   # What a caller's own pull request runs: build and scan, publish nothing. Also
-  # carries the two inputs that have no other home - a narrowed severity and a
+  # carries the two inputs that have no other home - a widened severity and a
   # shortened timeout.
+  #
+  # The severity value is lowercase, spaced and two-item on purpose: between
+  # them those cover the case folding, the whitespace stripping and the splitter
+  # in `Resolve scan severities`, which a single bare `MEDIUM` would not. It
+  # cannot assert that MEDIUM findings now fail the build - nothing that fails
+  # is testable here - only that a widened list is accepted and scanned with.
+  # The clean fixture has no fixable finding at any severity today, so this adds
+  # coverage without adding a way for the scenario to go red.
   build-only:
     name: push false, build and scan only
     needs: shared
@@ -117,7 +125,7 @@ jobs:
       registry-username: ${{ github.actor }}
       context-path: tests/fixtures/clean
       push: false
-      scan-severity: "CRITICAL"
+      extra-scan-severity: "medium, low"
       timeout-minutes: 15
       tags: |
         type=raw,value=never-published-${{ github.run_id }}
@@ -238,6 +246,12 @@ jobs:
   # The YAML ignore form: one file, carrying a reason and an expiry. `push` is
   # false and `scan` is left at its default, which is the combination that scans
   # without publishing - so the ignore file is genuinely read.
+  #
+  # No severity input. These scenarios used to narrow to CRITICAL so that the
+  # fixture's one CRITICAL was all the scan considered; HIGH is a floor now, so
+  # the ignore file has to account for every fixable HIGH in the fixture as
+  # well. See tests/README.md - that list needs re-checking when lodash gains a
+  # new one.
   trivyignore-yaml:
     name: trivyignores, YAML form
     needs: shared
@@ -254,7 +268,6 @@ jobs:
       image-name: ${{ needs.shared.outputs.image }}
       registry-username: ${{ github.actor }}
       context-path: tests/fixtures/vulnerable
-      scan-severity: "CRITICAL"
       trivyignores: tests/trivyignore/accepted.trivyignore.yaml
       push: false
     secrets:
@@ -278,7 +291,6 @@ jobs:
       image-name: ${{ needs.shared.outputs.image }}
       registry-username: ${{ github.actor }}
       context-path: tests/fixtures/vulnerable
-      scan-severity: "CRITICAL"
       trivyignores: tests/trivyignore/decoy.trivyignore,tests/trivyignore/accepted.trivyignore
       push: false
     secrets:
