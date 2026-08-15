@@ -245,10 +245,16 @@ description missed is invisible to the gate.
 Trivy reads the first platform in the index, which is why the SBOM covers one
 platform. See below.
 
-There are two SBOM attestations, both CycloneDX, both on the image digest:
+There are two SBOM attestations, both CycloneDX, both on the image digest. Tell
+them apart by `metadata.component.type`:
 
-- the image SBOM, whose `metadata.component` is the image reference,
-- the source SBOM, whose `metadata.component` is the build context path.
+| | `type` | `name` |
+| --- | --- | --- |
+| Image SBOM | `container` | the on-disk layout path |
+| Source SBOM | `application` | the `context-path` value |
+
+Use the `type`. The image SBOM's `name` is a runner temp path, which identifies
+nothing useful.
 
 `cosign verify-attestation --type cyclonedx` accepts both and returns both.
 Measured, because a second attestation of the same predicate type could have

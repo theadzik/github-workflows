@@ -32,9 +32,14 @@ Four rules hold, whatever the caller passes:
    dependencies, so an image scan cannot see them. The build context is scanned
    from its lock files before the build starts.
 
-[**docs/how-it-works.md**](docs/how-it-works.md) explains each of these, and the
-smaller decisions behind them. Read it before you change the workflow — the file
-itself carries short comments only.
+Each published image carries a signature, two SBOMs and a provenance statement.
+[**docs/using-the-artifacts.md**](docs/using-the-artifacts.md) shows what to do
+with them: verifying an image, answering "are we affected by this CVE" without
+rebuilding, and tracing a running image back to its commit.
+
+[**docs/how-it-works.md**](docs/how-it-works.md) explains the four rules above,
+and the smaller decisions behind them. Read it before you change the workflow —
+the file itself carries short comments only.
 
 ### Usage
 
