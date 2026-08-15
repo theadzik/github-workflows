@@ -129,7 +129,7 @@ jobs:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
       EXTRA_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
-  # One non-default platform - the case syft gets wrong on its own.
+  # One non-default platform, built and scanned under emulation.
   arm64:
     name: linux/arm64 only
     needs: shared
@@ -151,8 +151,8 @@ jobs:
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
-  # An index, not a manifest: the coverage warning fires and syft describes
-  # the first platform only.
+  # An index, not a manifest: QEMU, the scan loop running once per platform,
+  # and the SBOM warning.
   multi-platform:
     name: Multi-platform index
     needs: shared

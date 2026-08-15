@@ -43,7 +43,7 @@ on:
         type: string
         default: ""
       platforms:
-        description: "Multi-platform is allowed, but Trivy scans only one platform of the index."
+        description: "Comma-separated. Every platform is scanned. Anything other than linux/amd64 sets up QEMU, so a cross build can RUN."
         required: false
         type: string
         default: "linux/amd64"
@@ -147,12 +147,13 @@ jobs:
           echo "severity=${severities}" >> "$GITHUB_OUTPUT"
           echo "Fixable findings at ${severities} fail this build."
 
-      - name: Warn on multi-platform scan coverage
+      # Every platform is scanned, but the SBOM describes only the first.
+      - name: Warn on multi-platform SBOM coverage
         if: contains(inputs.platforms, ',')
         env:
           PLATFORMS: ${{ inputs.platforms }}
         run: |-
-          echo "::warning title=Scan coverage::${PLATFORMS} produces a multi-platform index. Trivy scans and syft inventories one platform; the others are signed unscanned and undescribed."
+          echo "::warning title=SBOM coverage::${PLATFORMS} produces a multi-platform index. Every platform is scanned, but the attested SBOM describes the first one only."
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -162,6 +163,12 @@ jobs:
           # Keeps the checkout token out of .git/config, the build cache and any
           # layer built by a `COPY .`. Nothing here pushes via git.
           persist-credentials: false
+
+      # A cross-platform RUN needs emulation. Skipped for a native-only build,
+      # where it would cost time and do nothing.
+      - name: Set up QEMU
+        if: inputs.platforms != 'linux/amd64'
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -218,6 +225,8 @@ jobs:
       # directory, which is the caller's repo. All three are pinned here instead.
       - name: Write the Trivy configuration
         if: inputs.push || inputs.scan
+        env:
+          TRIVYIGNORES: ${{ inputs.trivyignores }}
         run: |-
           set -euo pipefail
 
@@ -228,13 +237,56 @@ jobs:
           disable-rules: []
           EOF
 
+          # Resolve `trivyignores` against the caller's checkout. One YAML file,
+          # or one or more plain files concatenated. Mixing the forms is refused.
+          ignorefile="${RUNNER_TEMP}/empty.trivyignore"
+          yaml=() plain=()
+          IFS=',' read -ra requested <<< "${TRIVYIGNORES}"
+          for raw in "${requested[@]}"; do
+            path="${raw#"${raw%%[![:space:]]*}"}"
+            path="${path%"${path##*[![:space:]]}"}"
+            [[ -z "${path}" ]] && continue
+            if [[ ! -f "${path}" ]]; then
+              echo "::error title=trivyignores::${path} does not exist in the checked-out repository"
+              exit 1
+            fi
+            case "${path}" in
+              *.yaml | *.yml) yaml+=("${path}") ;;
+              *) plain+=("${path}") ;;
+            esac
+          done
+
+          if [[ ${#yaml[@]} -gt 0 && ${#plain[@]} -gt 0 ]]; then
+            echo "::error title=trivyignores::cannot mix the YAML form with plain .trivyignore files"
+            exit 1
+          elif [[ ${#yaml[@]} -gt 1 ]]; then
+            echo "::error title=trivyignores::only one .trivyignore.yaml is allowed, got ${#yaml[@]}"
+            exit 1
+          elif [[ ${#yaml[@]} -eq 1 ]]; then
+            # Absolute, so the scan step does not depend on its working
+            # directory matching this one.
+            ignorefile=$(realpath "${yaml[0]}")
+          elif [[ ${#plain[@]} -gt 0 ]]; then
+            ignorefile="${RUNNER_TEMP}/combined.trivyignore"
+            cat "${plain[@]}" > "${ignorefile}"
+          fi
+
+          # Echoed so a run that passed always shows which acceptances were in
+          # force. `show-suppressed` below shows which of them actually fired.
+          if [[ "${ignorefile}" != "${RUNNER_TEMP}/empty.trivyignore" ]]; then
+            echo "Ignore file in force (${ignorefile}):"
+            cat "${ignorefile}"
+          else
+            echo "No ignore file; every finding counts."
+          fi
+
           cat > "${RUNNER_TEMP}/trivy.yaml" <<'EOF'
           # An EOL distro scans clean and exits 0 without this.
           exit-on-eol: 1
 
+          # `table-mode` is not here: it is rejected unless the format is table,
+          # and this file is also used to generate the CycloneDX SBOM.
           dependency-tree: true
-          table-mode:
-            - detailed
 
           scan:
             show-suppressed: true
@@ -251,27 +303,88 @@ jobs:
           # Appended, because the heredoc above is unexpanded on purpose.
           {
             printf '\n'
-            printf 'ignorefile: %s\n' "${RUNNER_TEMP}/empty.trivyignore"
+            printf 'ignorefile: %s\n' "${ignorefile}"
             printf 'secret:\n  config: %s\n' "${RUNNER_TEMP}/trivy-secret.yaml"
           } >> "${RUNNER_TEMP}/trivy.yaml"
 
           echo "Trivy configuration for this run:"
           cat "${RUNNER_TEMP}/trivy.yaml"
 
-      # Scans the layout on disk, so a finding keeps the image out of the
-      # registry. Do not add `image-ref`: it competes with `input`.
-      - name: Scan image for vulnerabilities
+      # The CLI, not trivy-action: a `uses:` step cannot loop, and every
+      # platform in the index has to be scanned separately.
+      - name: Install Trivy
         if: inputs.push || inputs.scan
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
         with:
           version: v0.74.0
-          trivy-config: ${{ runner.temp }}/trivy.yaml
-          input: ${{ runner.temp }}/layout
-          severity: ${{ steps.severity.outputs.severity }}
-          ignore-unfixed: true
-          exit-code: "1"
-          format: table
-          trivyignores: ${{ inputs.trivyignores }}
+
+      # `--platform` is accepted but silently ignored for `--input`, so each
+      # platform is scanned with index.json rewritten to name only that one.
+      - name: Scan every platform for vulnerabilities
+        if: inputs.push || inputs.scan
+        env:
+          SEVERITY: ${{ steps.severity.outputs.severity }}
+        run: |-
+          set -euo pipefail
+          layout="${RUNNER_TEMP}/layout"
+          index="${layout}/index.json"
+
+          scan() {
+            trivy image \
+              --config "${RUNNER_TEMP}/trivy.yaml" \
+              --input "${layout}" \
+              --severity "${SEVERITY}" \
+              --ignore-unfixed \
+              --exit-code 1 \
+              --format table \
+              --table-mode detailed
+          }
+
+          # No provenance leaves a manifest at the root; anything else an index.
+          # `unknown/unknown` children are buildkit's attestation manifests.
+          root_media=$(jq -r '.manifests[0].mediaType' "${index}")
+          children='[]'
+          if [[ "${root_media}" == "application/vnd.oci.image.index.v1+json" ]]; then
+            root=$(jq -r '.manifests[0].digest' "${index}" | sed 's/^sha256://')
+            children=$(jq -c '[.manifests[] | select((.platform.os // "unknown") != "unknown")]' \
+              "${layout}/blobs/sha256/${root}")
+          fi
+          count=$(jq 'length' <<< "${children}")
+
+          if [[ "${count}" -le 1 ]]; then
+            echo "Single-platform layout."
+            scan
+            exit 0
+          fi
+
+          # Restored on any exit: the push reads this file back.
+          cp "${index}" "${index}.orig"
+          trap 'mv -f "${index}.orig" "${index}"' EXIT
+
+          failed=()
+          for i in $(seq 0 $((count - 1))); do
+            manifest=$(jq -c ".[${i}]" <<< "${children}")
+            platform=$(jq -r '[.platform.os, .platform.architecture, (.platform.variant // empty)] | join("/")' <<< "${manifest}")
+
+            jq -n --argjson m "${manifest}" \
+              '{schemaVersion: 2, mediaType: "application/vnd.oci.image.index.v1+json", manifests: [$m]}' \
+              > "${index}"
+
+            echo "::group::Scanning ${platform}"
+            if scan; then
+              echo "${platform}: clean"
+            else
+              echo "::error title=Scan::${platform} has findings at ${SEVERITY}"
+              failed+=("${platform}")
+            fi
+            echo "::endgroup::"
+          done
+
+          if [[ ${#failed[@]} -gt 0 ]]; then
+            echo "::error title=Scan::findings on ${#failed[@]} of ${count} platforms: ${failed[*]}"
+            exit 1
+          fi
+          echo "All ${count} platforms scanned clean at ${SEVERITY}."
 
       # Pinned: 2.x and 3.x write the signature in different places.
       - name: Install Cosign
@@ -284,13 +397,6 @@ jobs:
         if: inputs.push
         uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
 
-      # Pinned above the action's default, which cannot read a layout whose root
-      # is an index. Check any new version against such a layout first.
-      - name: Install syft
-        if: inputs.push
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
-        with:
-          syft-version: v1.51.0
 
       # No tag yet, so nothing can select the image until the tags go up last.
       # The digest is read back from the registry rather than trusted.
@@ -310,26 +416,25 @@ jobs:
             exit 1
           fi
 
-      # A signature *on* the image. Kyverno's verifyImageSignatures needs this,
-      # and an attestation is not a substitute.
+      # A signature *on* the image; an attestation is not a substitute.
+      # `--recursive` signs every child, not only the index.
       - name: Sign image
         if: inputs.push
         env:
           DIGEST: ${{ steps.layout.outputs.digest }}
-        run: cosign sign --yes "${IMAGE_REF}@${DIGEST}"
+        run: cosign sign --yes --recursive "${IMAGE_REF}@${DIGEST}"
 
-      # CycloneDX, from the same layout Trivy scanned. syft's SPDX writer omits
-      # the OS component, and Trivy then reports nothing for the document.
+      # CycloneDX, from the same layout and the same binary that gated the
+      # build. Describes the first platform in the index.
       - name: Generate SBOM from the layout
         if: inputs.push
-        env:
-          PLATFORMS: ${{ inputs.platforms }}
         run: |-
           set -euo pipefail
-          # syft defaults to linux/amd64 and fails on a layout without it.
-          primary="${PLATFORMS%%,*}"
-          primary="${primary//[[:space:]]/}"
-          syft "oci-dir:${RUNNER_TEMP}/layout" --platform "${primary}" -o cyclonedx-json=sbom.cdx.json
+          trivy image \
+            --config "${RUNNER_TEMP}/trivy.yaml" \
+            --input "${RUNNER_TEMP}/layout" \
+            --format cyclonedx \
+            --output sbom.cdx.json
 
           os=$(jq -r '[.components[]? | select(.type=="operating-system") | .name] | join(",")' sbom.cdx.json)
           if [[ -z "${os}" ]]; then
@@ -357,7 +462,9 @@ jobs:
           subject-digest: ${{ steps.layout.outputs.digest }}
           push-to-registry: true
 
-      - name: Verify signature
+      # Checks the index and every child, because `--recursive` signed them all.
+      # A child that failed to sign would otherwise surface at admission.
+      - name: Verify signatures
         if: inputs.push
         env:
           DIGEST: ${{ steps.layout.outputs.digest }}
@@ -366,11 +473,47 @@ jobs:
           SIGNER_IDENTITY: '^https://github\.com/theadzik/github-workflows/\.github/workflows/build-and-push\.yaml@.+$'
         run: |-
           set -euo pipefail
-          cosign verify \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --certificate-identity-regexp "${SIGNER_IDENTITY}" \
-            "${IMAGE_REF}@${DIGEST}" > /dev/null
-          echo "Signature verified for ${IMAGE_REF}@${DIGEST}"
+          index="${RUNNER_TEMP}/layout/index.json"
+
+          digests=("${DIGEST}")
+          if [[ "$(jq -r '.manifests[0].mediaType' "${index}")" == "application/vnd.oci.image.index.v1+json" ]]; then
+            root=$(jq -r '.manifests[0].digest' "${index}" | sed 's/^sha256://')
+            # Command substitution, not `< <(...)`: a process substitution that
+            # fails here would leave the children unverified and still exit 0.
+            children=$(jq -r '.manifests[].digest' "${RUNNER_TEMP}/layout/blobs/sha256/${root}")
+            while read -r child; do
+              [[ -n "${child}" ]] && digests+=("${child}")
+            done <<< "${children}"
+          fi
+
+          for digest in "${digests[@]}"; do
+            cosign verify \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --certificate-identity-regexp "${SIGNER_IDENTITY}" \
+              "${IMAGE_REF}@${digest}" > /dev/null
+            echo "Verified ${IMAGE_REF}@${digest}"
+          done
+          echo "Verified ${#digests[@]} signature(s)."
+
+      # Both attestations, read back from the registry. A malformed or missing
+      # one would otherwise be found by the cluster instead of by this build.
+      - name: Verify attestations
+        if: inputs.push
+        env:
+          DIGEST: ${{ steps.layout.outputs.digest }}
+          SIGNER_IDENTITY: '^https://github\.com/theadzik/github-workflows/\.github/workflows/build-and-push\.yaml@.+$'
+        run: |-
+          set -euo pipefail
+          # cosign shorthands: https://cyclonedx.org/bom and
+          # https://slsa.dev/provenance/v1, the types actions/attest sets.
+          for type in cyclonedx slsaprovenance1; do
+            cosign verify-attestation \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              --certificate-identity-regexp "${SIGNER_IDENTITY}" \
+              --type "${type}" \
+              "${IMAGE_REF}@${DIGEST}" > /dev/null
+            echo "Verified ${type} attestation on ${IMAGE_REF}@${DIGEST}"
+          done
 
       # Last, so the image becomes discoverable only once it is signed.
       # `imagetools create` keeps the digest, so the referrers stay findable.

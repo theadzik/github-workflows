@@ -19,7 +19,8 @@ build → OCI layout on disk → Trivy scan
 Four rules hold, whatever the caller passes:
 
 1. **Nothing unscanned reaches the registry.** The scan runs while the image is
-   still on disk. A finding fails the job before anything is pushed.
+   still on disk. A finding fails the job before anything is pushed. Every
+   platform of a multi-platform index is scanned on its own.
 2. **The caller cannot reconfigure the scan.** Trivy looks for three
    configuration files in the working directory, which is the caller's own
    repository. All three are pinned to files this workflow writes.
@@ -88,7 +89,7 @@ not a provider.
 | `fetch-depth` | `1` | Checkout depth. Use `0` when the build reads `.git`. |
 | `tags` | `type=raw,value=latest` | `docker/metadata-action` tag spec, one per line. |
 | `build-args` | *(none)* | Build args, one `KEY=value` per line. |
-| `platforms` | `linux/amd64` | Multi-platform is allowed. Trivy and syft cover one platform of the index; the rest are signed unscanned. The job warns when you opt in. |
+| `platforms` | `linux/amd64` | Comma-separated. Every platform is scanned separately. Anything other than `linux/amd64` sets up QEMU, so a cross build can `RUN`. The attested SBOM still describes the first platform only, and the job warns when that applies. |
 | `push` | `true` | `false` builds and scans only, for pull requests. |
 | `scan` | `true` | Fail on fixable findings. Applies only when `push` is `false`. The gate is `push \|\| scan`, so nothing is ever pushed unscanned. |
 | `extra-scan-severity` | *(none)* | Severities to fail on as well as HIGH and CRITICAL: `UNKNOWN`, `LOW`, `MEDIUM`, comma-separated. Naming HIGH or CRITICAL fails the run. |
@@ -136,7 +137,7 @@ get a pull request when a new tag is released here.
 
 | Tag | Shape |
 | --- | --- |
-| `v3` | Same pipeline as `v2`, but the caller can no longer weaken the scan. HIGH and CRITICAL become a floor, `scan: false` stops applying to a publishing run, and the workflow owns the Trivy configuration instead of reading the caller's. |
+| `v3` | Same pipeline as `v2`, but the caller can no longer weaken the scan. HIGH and CRITICAL become a floor, `scan: false` stops applying to a publishing run, and the workflow owns the Trivy configuration instead of reading the caller's. Every platform of a multi-platform index is scanned, and QEMU makes a cross-platform `RUN` work. |
 | `v2` | Builds to an OCI layout, scans it on disk, then pushes by digest with `oras`. Nothing unscanned reaches the registry. Registry, credentials and namespace all come from the caller. |
 | `v1` | Builds straight into the registry (`push-by-digest`), then scans the pushed digest. Docker Hub assumed throughout. |
 
@@ -146,5 +147,6 @@ A major tag means a caller has to change something, not only move a pin.
 **v2 to v3 in short.** `scan-severity` is removed; use `extra-scan-severity`,
 which only widens the gate. `scan: false` no longer applies when `push` is true.
 A `trivy.yaml`, `.trivyignore` or `trivy-secret.yaml` in the caller's repository
-is no longer read. An end-of-life base image now fails the build. A build that
-passed under v2 can therefore fail under v3 — which is the point of the change.
+is no longer read. An end-of-life base image now fails the build. Every platform
+of a multi-platform build is scanned, where v2 scanned one. A build that passed
+under v2 can therefore fail under v3 — which is the point of the change.

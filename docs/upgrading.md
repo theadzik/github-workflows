@@ -111,7 +111,61 @@ alarm. An EOL base scans clean and exits 0 because Trivy has nothing to
 
 Move to a base image that still receives patches.
 
-### 5. Things that did not change
+### 5. Multi-platform builds are scanned in full, and can now `RUN`
+
+Two changes land together here.
+
+**Every platform is scanned.** v2 scanned one platform of a multi-platform index
+and signed all of them. `trivy image --input` picks one child manifest and has no
+flag to choose another. v3 scans each platform separately.
+
+If you build for more than one platform, v3 checks images that v2 never looked
+at. A build that passed under v2 can fail under v3 because of a finding on a
+platform that was never scanned before. That finding was always there.
+
+**A cross-platform `RUN` works.** v3 sets up QEMU whenever `platforms` is
+anything other than `linux/amd64`. Under v2 a `RUN` on a foreign architecture
+failed with `exec format error`, so cross builds had to be limited to `COPY`.
+
+No input changes for either. The behaviour follows `platforms`.
+
+One gap remains: the attested SBOM still describes the first platform in the
+list. The build prints a warning when that applies.
+
+### 6. The SBOM is written by Trivy, not syft
+
+v2 installed syft to write the CycloneDX SBOM. v3 uses Trivy, which already runs
+for the scan.
+
+No input changes, and the SBOM is still CycloneDX with an `operating-system`
+component, so anything reading it keeps working. Two differences if you compare
+documents byte for byte:
+
+- syft also emitted about 80 `file` components, such as `/etc/passwd`. Trivy does
+  not. Package coverage is identical, and re-scanning either document reports the
+  same CVEs.
+- Trivy embeds the vulnerabilities it found, because the scanners are enabled.
+
+### 7. Every platform of a multi-platform image is signed
+
+v2 signed the index only. v3 adds `cosign sign --recursive`, which signs the
+index and every child manifest, and then verifies all of them before publishing
+any tag.
+
+No input changes. A multi-platform build now produces more signatures than it
+did, and a single-platform build produces two or three instead of one, because
+buildkit's provenance manifests are children too.
+
+### 8. The attestations are verified before any tag is published
+
+v3 adds a `Verify attestations` step. It reads the SBOM and provenance
+attestations back from the registry with `cosign verify-attestation`, and fails
+the build if either is missing or does not verify.
+
+No input changes. A build that produced a broken attestation used to publish
+tags anyway; it now stops.
+
+### 9. Things that did not change
 
 - Every other input keeps its name, type and default.
 - The outputs are unchanged.
