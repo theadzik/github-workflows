@@ -1,11 +1,17 @@
-# The YAML form: one file, carrying the reason and an expiry alongside the id.
-# Used by the `trivyignore-yaml` scenario against tests/fixtures/vulnerable,
-# which fails the scan without it.
+# The YAML form, for the `trivyignore-yaml` scenario. Must list every fixable
+# HIGH and CRITICAL in tests/fixtures/vulnerable. See tests/README.md.
 vulnerabilities:
   - id: CVE-2019-10744
     statement: >-
       Test fixture. This finding exists on purpose, so that the scenario
       exercising `trivyignores` has something real to suppress.
-    # Far out deliberately: this acceptance is a fixture, not a decision anyone
-    # should be asked to revisit.
+    expired_at: 2099-01-01
+  - id: CVE-2020-8203
+    statement: Test fixture. Suppressed only because the scan cannot narrow past HIGH.
+    expired_at: 2099-01-01
+  - id: CVE-2021-23337
+    statement: Test fixture. Suppressed only because the scan cannot narrow past HIGH.
+    expired_at: 2099-01-01
+  - id: CVE-2026-4800
+    statement: Test fixture. Suppressed only because the scan cannot narrow past HIGH.
     expired_at: 2099-01-01

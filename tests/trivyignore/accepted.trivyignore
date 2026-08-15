@@ -1,3 +1,6 @@
 # The plain form, listed second, and the only file in that list that suppresses
-# anything. See decoy.trivyignore.
+# anything. Keep in step with accepted.trivyignore.yaml. See tests/README.md.
 CVE-2019-10744
+CVE-2020-8203
+CVE-2021-23337
+CVE-2026-4800

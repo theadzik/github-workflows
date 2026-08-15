@@ -1,7 +1,7 @@
 name: Build and Push Docker Image
 
-# Shared reusable workflow. The caller owns every registry detail: where to
-# publish, who to authenticate as, and which credential to use.
+# Reusable workflow. The caller owns every registry detail.
+# Read README.md before you change this file.
 on:
   workflow_call:
     inputs:
@@ -53,28 +53,17 @@ on:
         type: boolean
         default: true
       scan:
-        description: "Fail the build on fixable HIGH/CRITICAL findings before anything is published."
+        description: "Fail on fixable findings. Only applies when push is false; the gate is push || scan."
         required: false
         type: boolean
         default: true
-      scan-severity:
+      extra-scan-severity:
+        description: "Severities to fail on as well as HIGH and CRITICAL. UNKNOWN, LOW or MEDIUM, comma-separated."
         required: false
         type: string
-        default: "HIGH,CRITICAL"
+        default: ""
       trivyignores:
-        description: |
-          Repo-relative path to a Trivy ignore file, suppressing findings the
-          caller has accepted. One .trivyignore.yaml, or a comma-separated list
-          of plain .trivyignore files - the action refuses to mix the two, and
-          refuses more than one of the YAML form.
-
-          Prefer the YAML form: it carries `expired_at`, so an acceptance stops
-          applying on a date instead of outliving the reason for it, and
-          `statement`, so the reason is recorded next to what it excuses.
-
-          The path resolves against the checked-out caller repository, at the
-          same ref this build uses, and a path that does not exist fails the
-          step rather than scanning unfiltered.
+        description: "Repo-relative path to a Trivy ignore file. One .trivyignore.yaml, or a comma-separated list of plain .trivyignore files."
         required: false
         type: string
         default: ""
@@ -112,10 +101,7 @@ env:
 
 jobs:
   build-push-sign:
-    # Callers must grant at least this set: a called workflow cannot hold more
-    # than its caller, and asking for more fails the run at startup.
-    # packages: write is what a registry authenticating with the job token
-    # needs; it is inert for any other registry.
+    # The caller must grant at least this set, or the run fails at startup.
     permissions:
       contents: read
       id-token: write
@@ -128,10 +114,39 @@ jobs:
       digest: ${{ steps.layout.outputs.digest }}
       image-ref: ${{ env.IMAGE_REF }}
     steps:
-      # Trivy scans one platform out of a multi-platform index, so the platforms
-      # beyond the first are signed without having been scanned. Accepted
-      # deliberately rather than blocked, but it should be visible in the log of
-      # any build that opts into it.
+      # HIGH,CRITICAL is a floor the caller cannot lower. First step, so a bad
+      # value fails in seconds instead of after a full build.
+      - name: Resolve scan severities
+        id: severity
+        env:
+          EXTRA: ${{ inputs.extra-scan-severity }}
+        run: |-
+          set -euo pipefail
+          severities="HIGH,CRITICAL"
+
+          IFS=',' read -ra requested <<< "${EXTRA}"
+          for raw in "${requested[@]}"; do
+            token="${raw//[[:space:]]/}"
+            [[ -z "${token}" ]] && continue
+            token="${token^^}"
+            case "${token}" in
+              UNKNOWN | LOW | MEDIUM)
+                [[ ",${severities}," == *",${token},"* ]] || severities="${severities},${token}"
+                ;;
+              HIGH | CRITICAL)
+                echo "::error title=Scan severity::${token} always fails this build. extra-scan-severity adds severities below HIGH; it cannot restate the floor or remove it."
+                exit 1
+                ;;
+              *)
+                echo "::error title=Scan severity::'${raw}' is not a Trivy severity. extra-scan-severity takes UNKNOWN, LOW or MEDIUM."
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "severity=${severities}" >> "$GITHUB_OUTPUT"
+          echo "Fixable findings at ${severities} fail this build."
+
       - name: Warn on multi-platform scan coverage
         if: contains(inputs.platforms, ',')
         env:
@@ -144,10 +159,8 @@ jobs:
         with:
           ref: ${{ inputs.git-ref }}
           fetch-depth: ${{ inputs.fetch-depth }}
-          # Otherwise checkout writes an x-access-token auth header into
-          # .git/config. A `COPY .` would bake that token into a builder layer,
-          # and `cache-to: type=gha,mode=max` would export it to the Actions
-          # cache, where it outlives the job. Nothing here pushes via git.
+          # Keeps the checkout token out of .git/config, the build cache and any
+          # layer built by a `COPY .`. Nothing here pushes via git.
           persist-credentials: false
 
       - name: Set up Docker Buildx
@@ -175,21 +188,8 @@ jobs:
           images: ${{ env.IMAGE_REF }}
           tags: ${{ inputs.tags }}
 
-      # One build, one artifact, exported to an OCI layout on disk rather than
-      # straight into the registry. Everything downstream - the scan, the push,
-      # the signature, the attestations - references the digest this produces,
-      # so the bytes that were scanned are the bytes that get signed and
-      # deployed. The same exporter serves both paths: a build-only run simply
-      # never pushes what it built.
-      #
-      # `sbom` is deliberately not set. BuildKit's SBOM pipeline is SPDX-only
-      # (frontend/attestations/sbom/sbom.go hardcodes the SPDX predicate), and
-      # syft's SPDX writer emits no OPERATING-SYSTEM package, which Trivy's SPDX
-      # parser requires to establish distro context. The result reads as a clean
-      # scan rather than an error: measured against ghcr.io/theadzik images,
-      # `trivy sbom` returned zero OS packages where `trivy image` found twelve.
-      # The SBOM is generated from the same layout by syft below, as CycloneDX,
-      # which both Trivy and Grype read correctly.
+      # Exports to disk, not to the registry, so the scan runs before the push.
+      # Do not set `sbom`: BuildKit writes SPDX, which Trivy reads as empty.
       - name: Build to OCI layout
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -205,8 +205,7 @@ jobs:
           build-args: |
             ${{ inputs.build-args }}
 
-      # index.json is the authority, not the action's digest output: this is the
-      # digest that will exist in the registry.
+      # index.json is the authority, not the action's digest output.
       - name: Read layout digest
         id: layout
         run: |-
@@ -215,60 +214,86 @@ jobs:
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
           echo "Built ${digest}"
 
-      # Scans the layout on disk, before anything is pushed, so a finding keeps
-      # the image out of the registry.
-      #
-      # `input` takes an OCI layout directory despite being documented as a tar
-      # file. Do not add `image-ref`: the action runs `trivy image .` with the
-      # target passed as TRIVY_INPUT, and `image-ref` replaces that dot, leaving
-      # two competing targets.
-      #
-      # The action echoes the ignore file into the log before scanning, so a run
-      # that passed always shows which acceptances were in force when it did.
+      # Trivy finds trivy.yaml, .trivyignore and trivy-secret.yaml in the working
+      # directory, which is the caller's repo. All three are pinned here instead.
+      - name: Write the Trivy configuration
+        if: inputs.push || inputs.scan
+        run: |-
+          set -euo pipefail
+
+          # `disable-rules: []` and not an empty file: Trivy fails on a secret
+          # config with no YAML node in it.
+          : > "${RUNNER_TEMP}/empty.trivyignore"
+          cat > "${RUNNER_TEMP}/trivy-secret.yaml" <<'EOF'
+          disable-rules: []
+          EOF
+
+          cat > "${RUNNER_TEMP}/trivy.yaml" <<'EOF'
+          # An EOL distro scans clean and exits 0 without this.
+          exit-on-eol: 1
+
+          dependency-tree: true
+          table-mode:
+            - detailed
+
+          scan:
+            show-suppressed: true
+            # Written down so a Trivy release cannot drop either one silently.
+            scanners:
+              - vuln
+              - secret
+
+          db:
+            # The progress bar only. `hide-progress` would drop the whole log.
+            no-progress: true
+          EOF
+
+          # Appended, because the heredoc above is unexpanded on purpose.
+          {
+            printf '\n'
+            printf 'ignorefile: %s\n' "${RUNNER_TEMP}/empty.trivyignore"
+            printf 'secret:\n  config: %s\n' "${RUNNER_TEMP}/trivy-secret.yaml"
+          } >> "${RUNNER_TEMP}/trivy.yaml"
+
+          echo "Trivy configuration for this run:"
+          cat "${RUNNER_TEMP}/trivy.yaml"
+
+      # Scans the layout on disk, so a finding keeps the image out of the
+      # registry. Do not add `image-ref`: it competes with `input`.
       - name: Scan image for vulnerabilities
-        if: inputs.scan
+        if: inputs.push || inputs.scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          version: v0.74.0
+          trivy-config: ${{ runner.temp }}/trivy.yaml
           input: ${{ runner.temp }}/layout
-          severity: ${{ inputs.scan-severity }}
+          severity: ${{ steps.severity.outputs.severity }}
           ignore-unfixed: true
           exit-code: "1"
           format: table
           trivyignores: ${{ inputs.trivyignores }}
 
-      # The version is pinned because 3.x and 2.x write the signature in
-      # different places, and which one Kyverno accepts should not change under
-      # an installer default.
+      # Pinned: 2.x and 3.x write the signature in different places.
       - name: Install Cosign
         if: inputs.push
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          cosign-release: v3.1.2
+          cosign-release: v3.1.3
 
       - name: Install oras
         if: inputs.push
         uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
 
-      # syft is pinned independently of the action that installs it. The action
-      # defaults to v1.42.3, which cannot read the layout this workflow builds:
-      # `provenance: mode=max` makes the layout root an image *index* rather than
-      # a manifest, and 1.42.3 rejects it with "unexpected media type ...
-      # image.index.v1+json". 1.50.0 reads it. Bump this deliberately, and only
-      # after checking the new version still parses a layout with attestations.
+      # Pinned above the action's default, which cannot read a layout whose root
+      # is an index. Check any new version against such a layout first.
       - name: Install syft
         if: inputs.push
         uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          syft-version: v1.50.0
+          syft-version: v1.51.0
 
-      # Pushed at its digest with no tag written, so ArgoCD Image Updater - which
-      # discovers images by listing tags - cannot see it until the tags go up
-      # last, after the signature and attestations exist. oras reuses the
-      # credentials docker/login-action wrote to ~/.docker/config.json.
-      #
-      # The descriptor is then read back from the registry rather than trusted
-      # from the push output, so a registry that stored something else says so
-      # here instead of at admission.
+      # No tag yet, so nothing can select the image until the tags go up last.
+      # The digest is read back from the registry rather than trusted.
       - name: Push layout by digest
         if: inputs.push
         env:
@@ -285,47 +310,27 @@ jobs:
             exit 1
           fi
 
-      # A signature *on* the image, which is what the Kyverno policy's
-      # verifyImageSignatures call looks for; the attestations below are signed
-      # statements *about* it. Keyless, so the signing identity is this
-      # workflow's OIDC token - the same one that signs the attestations, and
-      # the one the policy's subjectRegExp matches.
-      #
-      # cosign reads the credentials docker/login-action wrote to
-      # ~/.docker/config.json.
+      # A signature *on* the image. Kyverno's verifyImageSignatures needs this,
+      # and an attestation is not a substitute.
       - name: Sign image
         if: inputs.push
         env:
           DIGEST: ${{ steps.layout.outputs.digest }}
         run: cosign sign --yes "${IMAGE_REF}@${DIGEST}"
 
-      # Inventories the same on-disk layout that Trivy scanned and oras pushed,
-      # so the bytes described are the bytes signed and deployed - no registry
-      # round-trip, and no second build to disagree with the first.
-      #
-      # CycloneDX rather than SPDX: syft's CycloneDX writer declares the OS as an
-      # `operating-system` component, which is what lets a reader map apk purls
-      # to a distro. Its SPDX writer does not, and Trivy silently reports nothing
-      # for such a document. Verified both ways before choosing.
+      # CycloneDX, from the same layout Trivy scanned. syft's SPDX writer omits
+      # the OS component, and Trivy then reports nothing for the document.
       - name: Generate SBOM from the layout
         if: inputs.push
         env:
           PLATFORMS: ${{ inputs.platforms }}
         run: |-
           set -euo pipefail
-          # syft defaults to linux/amd64 and hard-fails on a layout that does not
-          # contain it ("unexpected number of images matching platform
-          # linux/amd64 ... expected 1, found 0"). Naming the platform makes a
-          # single-arch arm64 build work, and makes the multi-platform case
-          # describe the first entry rather than whichever syft would pick.
-          # Trivy does not need this; it resolves the layout's own platform.
+          # syft defaults to linux/amd64 and fails on a layout without it.
           primary="${PLATFORMS%%,*}"
           primary="${primary//[[:space:]]/}"
           syft "oci-dir:${RUNNER_TEMP}/layout" --platform "${primary}" -o cyclonedx-json=sbom.cdx.json
 
-          # An SBOM that failed to identify the OS is the failure mode this
-          # whole format choice exists to avoid, so fail loudly rather than
-          # attest a document that reads as an empty scan.
           os=$(jq -r '[.components[]? | select(.type=="operating-system") | .name] | join(",")' sbom.cdx.json)
           if [[ -z "${os}" ]]; then
             echo "::error title=SBOM::no operating-system component; readers cannot match OS packages"
@@ -333,9 +338,8 @@ jobs:
           fi
           echo "SBOM: $(jq '.components|length' sbom.cdx.json) components, OS ${os}"
 
-      # actions/attest sniffs the document and sets the predicate type itself:
-      # https://cyclonedx.org/bom for CycloneDX, with no version suffix. The
-      # Kyverno policy in homelab matches on exactly that string.
+      # actions/attest sets the predicate type itself. The Kyverno policy in
+      # homelab matches https://cyclonedx.org/bom exactly.
       - name: Attest SBOM
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         if: inputs.push
@@ -353,21 +357,12 @@ jobs:
           subject-digest: ${{ steps.layout.outputs.digest }}
           push-to-registry: true
 
-      # Fails the job before any tag exists if the signature is not the one this
-      # workflow just wrote.
-      #
-      # The identity is this file: keyless signing puts the called workflow's
-      # job_workflow_ref in the certificate SAN, so it names this repository and
-      # this path regardless of which caller triggered the build. Only the ref
-      # after @ varies, since callers pin different commits. Renaming or moving
-      # this workflow changes the identity and must be reflected here.
       - name: Verify signature
         if: inputs.push
         env:
           DIGEST: ${{ steps.layout.outputs.digest }}
-          # Dots are escaped because this is a regexp and an unescaped one would
-          # also match a lookalike host or path. Only the ref after @ is open,
-          # since callers pin different commits of this file.
+          # The identity is this file's own path. If you rename or move this
+          # workflow, change this line with it or every build fails here.
           SIGNER_IDENTITY: '^https://github\.com/theadzik/github-workflows/\.github/workflows/build-and-push\.yaml@.+$'
         run: |-
           set -euo pipefail
@@ -377,10 +372,8 @@ jobs:
             "${IMAGE_REF}@${DIGEST}" > /dev/null
           echo "Signature verified for ${IMAGE_REF}@${DIGEST}"
 
-      # Only now does the image become discoverable, with its signature and
-      # attestations already in place. `imagetools create` re-pushes the same
-      # manifest under each tag rather than wrapping it in a new index, so the
-      # digest is unchanged and the referrers attached to it stay findable.
+      # Last, so the image becomes discoverable only once it is signed.
+      # `imagetools create` keeps the digest, so the referrers stay findable.
       - name: Publish tags
         if: inputs.push
         env:
