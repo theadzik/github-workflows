@@ -220,6 +220,29 @@ jobs:
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
+  # The fixture's lock file is vulnerable and its image is not, so a green run
+  # proves the source scan ran and that `trivyignores` reached it.
+  source-deps:
+    name: Source dependency scan
+    needs: shared
+    if: needs.shared.outputs.can-run == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      packages: write
+    uses: ./.github/workflows/build-and-push.yaml
+    with:
+      registry: ghcr.io
+      image-name: ${{ needs.shared.outputs.image }}
+      registry-username: ${{ github.actor }}
+      context-path: tests/fixtures/source-deps
+      trivyignores: tests/trivyignore/accepted.trivyignore
+      push: false
+    secrets:
+      REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+
   # The plain form. The file that suppresses anything is listed second.
   trivyignore-plain:
     name: trivyignores, plain form, two files
@@ -449,6 +472,7 @@ jobs:
       - scan-disabled
       - trivyignore-yaml
       - trivyignore-plain
+      - source-deps
       - published
       - cleanup
     runs-on: ubuntu-latest

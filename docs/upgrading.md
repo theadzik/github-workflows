@@ -3,6 +3,62 @@
 Version tags mark the caller contract. A major tag means a caller has to change
 something, not only move a pin.
 
+## v3 to v4
+
+v4 scans the build context as well as the image.
+
+Move the pin, then read the one thing that can fail a build that used to pass.
+
+```yaml
+uses: theadzik/github-workflows/.github/workflows/build-and-push.yaml@<commit-sha> # v4.0.0
+```
+
+No inputs change. No cluster change is needed.
+
+### 1. Your lock files are now scanned
+
+A multi-stage build usually throws its dependencies away. If you build with
+`pnpm install` and then copy only the compiled output into a runtime image, the
+image holds no JavaScript packages at all, and the image scan correctly reports
+none.
+
+Those dependencies still shape what the build produces. v4 therefore runs
+`trivy fs` over `context-path` before the build, using the same HIGH/CRITICAL
+floor, the same `extra-scan-severity`, and the same `trivyignores`.
+
+**A repository with a fixable HIGH or CRITICAL in a lock file will fail on its
+next build.** That finding was always there; nothing was scanning for it.
+
+Two ways forward, and they are the usual two:
+
+- Upgrade the dependency.
+- Record the acceptance in the file named by `trivyignores`.
+
+Use the id the scan prints. For npm advisories that is often a GHSA rather than
+a CVE:
+
+```text
+GHSA-5c6j-r48x-rmvq
+```
+
+An audit tool's own ignore list does **not** apply here. A `pnpm-workspace.yaml`
+carrying `auditConfig.ignoreGhsas` is read by `pnpm audit` and by nothing else.
+The workflow only reads the file you name in `trivyignores`.
+
+### 2. There are now two SBOM attestations
+
+Both are CycloneDX, both attached to the image digest. Tell them apart by
+`metadata.component`: the image reference for the image SBOM, the context path
+for the source one.
+
+`cosign verify-attestation --type cyclonedx` returns both and still exits 0, so
+any existing verification keeps working.
+
+### 3. The scan runs before the build
+
+A source finding now fails the run in seconds instead of after a full build. The
+Trivy configuration and install moved earlier in the job for the same reason.
+
 ## v2 to v3
 
 v3 makes the scan impossible to weaken from the caller side. Three things that
