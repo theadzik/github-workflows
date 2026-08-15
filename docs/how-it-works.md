@@ -228,7 +228,7 @@ writes the signature as an OCI referrer with the predicate
 should not change because an installer default changed. Dependabot does not
 track this input.
 
-`syft` is pinned to v1.50.0, above the action's own default of v1.42.3. The
+`syft` version is pinned above the action's default of v1.42.3. The
 default cannot read the layout this workflow builds. `provenance: mode=max`
 makes the layout root an image *index*, and v1.42.3 rejects it with
 `unexpected media type ... image.index.v1+json`. Check any new version against a
