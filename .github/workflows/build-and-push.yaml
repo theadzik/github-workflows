@@ -53,7 +53,12 @@ on:
         type: boolean
         default: true
       scan:
-        description: "Fail the build on fixable HIGH/CRITICAL findings before anything is published."
+        description: |
+          Fail the build on fixable findings.
+          Only ever takes the scan off a run that publishes nothing. The gate is
+          `push || scan`, so a build that pushes is scanned whatever this says:
+          scanning without pushing is the caller's choice to make, publishing
+          without scanning is not.
         required: false
         type: boolean
         default: true
@@ -233,7 +238,7 @@ jobs:
       # input, then environment variable, then config file, then default, so
       # anything the scan step passes below still wins.
       - name: Write the Trivy configuration
-        if: inputs.scan
+        if: inputs.push || inputs.scan
         run: |-
           set -euo pipefail
           cat > "${RUNNER_TEMP}/trivy.yaml" <<'EOF'
@@ -276,6 +281,12 @@ jobs:
       # Scans the layout on disk, before anything is pushed, so a finding keeps
       # the image out of the registry.
       #
+      # `push || scan` rather than `scan` alone: `scan: false` is for a caller
+      # who wants a build checked no further than that it builds, and it stops
+      # applying the moment the run would publish. There is no input combination
+      # that pushes an unscanned image, so the steps below can assume this one
+      # ran.
+      #
       # `input` takes an OCI layout directory despite being documented as a tar
       # file. Do not add `image-ref`: the action runs `trivy image .` with the
       # target passed as TRIVY_INPUT, and `image-ref` replaces that dot, leaving
@@ -290,7 +301,7 @@ jobs:
       # log along with the progress bar, and the log is where `Detected EOL OS`
       # appears. The progress bar is turned off in the configuration instead.
       - name: Scan image for vulnerabilities
-        if: inputs.scan
+        if: inputs.push || inputs.scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           version: v0.74.0

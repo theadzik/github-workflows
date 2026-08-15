@@ -210,8 +210,10 @@ jobs:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
   # The vulnerable fixture, allowed through only because scanning is off. It is
-  # built and never pushed: `scan: false` is a path worth covering, not a way to
-  # put a known-vulnerable image in the registry.
+  # built and never pushed - which is not a coincidence but the input's whole
+  # shape: the gate is `push || scan`, so `scan: false` is only honoured on a
+  # run that publishes nothing. Pushing this fixture would scan it and fail,
+  # whatever `scan` said.
   scan-disabled:
     name: scan false
     needs: shared
@@ -233,7 +235,9 @@ jobs:
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
 
-  # The YAML ignore form: one file, carrying a reason and an expiry.
+  # The YAML ignore form: one file, carrying a reason and an expiry. `push` is
+  # false and `scan` is left at its default, which is the combination that scans
+  # without publishing - so the ignore file is genuinely read.
   trivyignore-yaml:
     name: trivyignores, YAML form
     needs: shared

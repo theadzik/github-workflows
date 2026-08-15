@@ -38,7 +38,7 @@ what is not covered, below.
 | `every-optional-input` | `build-args`, several `tags`, `git-ref`, `fetch-depth: 0`, `extra-registry` login. |
 | `arm64` | A single platform that is not the default — the case syft gets wrong when left to pick. |
 | `multi-platform` | The coverage warning, an index push, syft describing the first platform. |
-| `scan-disabled` | `scan: false`, against the vulnerable fixture. Built, never pushed. |
+| `scan-disabled` | `scan: false`, against the vulnerable fixture. Built, never pushed — `scan: false` is only honoured when `push` is `false`. |
 | `trivyignore-yaml` / `trivyignore-plain` | Both accepted forms of `trivyignores`. |
 | `published` | The workflow's `digest` and `image-ref` outputs, the signature, the referrers and the tag — checked against what the `defaults` call left in the registry. |
 

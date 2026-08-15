@@ -116,7 +116,7 @@ rather than a provider.
 | `build-args` | *(none)* | Build args, one `KEY=value` per line. |
 | `platforms` | `linux/amd64` | Multi-platform is allowed, but Trivy scans only one platform of the index and the rest are signed unscanned. The job warns when you opt in. |
 | `push` | `true` | `false` builds and scans only, for pull requests. |
-| `scan` | `true` | Fail on fixable findings before anything is pushed. |
+| `scan` | `true` | Fail on fixable findings. Only honoured when `push` is `false` — the gate is `push \|\| scan`, so nothing is ever pushed unscanned. |
 | `scan-severity` | `HIGH,CRITICAL` | Trivy severities that fail the build. |
 | `registry` | *required* | Registry host to publish to. |
 | `registry-username` | *required* | User to authenticate to the registry as. |
