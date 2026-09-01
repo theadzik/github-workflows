@@ -20,9 +20,28 @@ The workflow file carries short comments only. The reasons are here.
 | `fixtures/source-deps` | The source scan | A `package-lock.json` pinning `lodash@4.17.11`, and an image that installs nothing. A finding can only come from `trivy fs`. |
 | `trivyignore/*` | `trivyignores`, both forms | One YAML file with a reason and an expiry. Two plain files, where only the second suppresses anything. |
 
-Base images float on `alpine:latest` on purpose. A digest pin would collect
-fixable HIGH and CRITICAL findings over time, and would turn unrelated pull
-requests red.
+Every fixture builds `FROM dhi.io/alpine-base:3.24-dev`, a Docker Hardened
+Image.
+
+They floated on `alpine:latest` before, for the reason a digest pin was
+rejected: a base that stops being patched collects fixable HIGH and CRITICAL
+findings and turns unrelated pull requests red. Floating did not deliver that.
+Docker Hub's `alpine:latest` shipped CVE-2026-14456 (HIGH, `libcrypto3` and
+`libssl3`, fixed in 3.5.8-r0) and every scanning scenario went red until Alpine
+published the fix — the `trivyignore-*` ones included, which then wanted a base
+CVE added to a file that exists to hold the fixture's own.
+
+The hardened tag is mutable too, so nothing here is pinned to a distribution
+that can age out of Trivy's support window. It is rebuilt with patched packages
+ahead of the advisory rather than behind it.
+
+`-dev` rather than the runtime variant, and the same tag for all five: `clean`,
+`build-args` and `cross` RUN a shell as root, and the runtime image runs as
+nonroot.
+
+The cost is a credential. dhi.io is not public, so every scenario passes
+`extra-registry: dhi.io` with `vars.DOCKERHUB_USERNAME` and
+`secrets.DOCKERHUB_TOKEN`. See [Who can run it](#who-can-run-it).
 
 The finding comes from an installed package, not from an old base image. The
 reason is the same one in reverse. A pinned old distribution ages out of Trivy's
@@ -95,7 +114,8 @@ anything.
 **They can fail for a reason that is not a bug.** `HIGH,CRITICAL` is a floor that
 no input can narrow. The ignore files must therefore list *every* fixable HIGH
 and CRITICAL in the fixture, not only the CVE the fixture exists for. A new
-lodash advisory turns both scenarios red until it is added.
+lodash advisory turns both scenarios red until it is added. A base image CVE
+used to do the same; the hardened base is what stopped that.
 
 `accepted.trivyignore` and `accepted.trivyignore.yaml` must stay in step with
 each other.
@@ -103,6 +123,8 @@ each other.
 Check both directions with two commands:
 
 ```shell
+# The base is not public.
+docker login dhi.io
 docker build -t vuln tests/fixtures/vulnerable
 
 # Must exit 1. The fixture is still vulnerable.
@@ -125,12 +147,15 @@ annotation rather than reporting a quiet green. Dispatch the workflow by hand
 against the branch to test such a change.
 
 Dependabot's pull requests do run. Its runs are treated like a fork's — read-only
-token, no repository secrets — but scopes named in a `permissions:` block are
-still granted, and every scenario names all five. Nothing here reads a repository
-secret; `secrets.GITHUB_TOKEN` is the job token and is always present.
+token, no Actions secrets — but scopes named in a `permissions:` block are still
+granted, and every scenario names all five.
 
-Adding a scenario that needs a real repository secret would break this, and it
-would break it only for dependabot.
+Every scenario does read one repository secret, `DOCKERHUB_TOKEN`, to pull the
+fixtures' base image. `secrets.GITHUB_TOKEN` is the job token and is always
+present; `DOCKERHUB_TOKEN` is not. A Dependabot run reads the Dependabot secret
+store rather than the Actions one, so the same token has to exist in both. A
+Dependabot pull request that fails at `Login to extra registry` while nothing
+else fails is that token missing from the Dependabot store.
 
 ## Cleanup
 

@@ -48,6 +48,7 @@ jobs:
           fi
 
   # The scenarios. Only paths a green run can prove; see tests/README.md.
+  # Every one logs in to dhi.io: the fixtures build FROM a hardened base there.
 
   # Required inputs only. The whole publishing chain runs.
   defaults:
@@ -66,8 +67,11 @@ jobs:
       image-name: ${{ needs.shared.outputs.image }}
       registry-username: ${{ github.actor }}
       context-path: tests/fixtures/clean
+      extra-registry: dhi.io
+      extra-registry-username: ${{ vars.DOCKERHUB_USERNAME }}
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      EXTRA_REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
 
   # A caller's own pull request: build and scan, publish nothing. The severity
   # value is lowercase and spaced on purpose - it tests the parser.
@@ -93,11 +97,15 @@ jobs:
       tags: |
         type=raw,value=never-published-${{ github.run_id }}
         type=sha
+      extra-registry: dhi.io
+      extra-registry-username: ${{ vars.DOCKERHUB_USERNAME }}
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      EXTRA_REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
 
   # The fixture's Dockerfile fails the build if the args do not arrive.
-  # The extra registry is ghcr.io again: the login step is what is under test.
+  # The extra registry is no longer this scenario's alone; it stays named here
+  # because this is the scenario that passes every optional input at once.
   every-optional-input:
     name: Build args, tags, ref, extra registry
     needs: shared
@@ -123,11 +131,11 @@ jobs:
         type=raw,value=build-args-${{ github.run_id }}
         type=raw,value=build-args-${{ github.run_id }}-second
         type=sha
-      extra-registry: ghcr.io
-      extra-registry-username: ${{ github.actor }}
+      extra-registry: dhi.io
+      extra-registry-username: ${{ vars.DOCKERHUB_USERNAME }}
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-      EXTRA_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      EXTRA_REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
 
   # One non-default platform, built and scanned under emulation.
   arm64:
@@ -148,8 +156,11 @@ jobs:
       context-path: tests/fixtures/cross
       platforms: "linux/arm64"
       tags: type=raw,value=arm64-${{ github.run_id }}
+      extra-registry: dhi.io
+      extra-registry-username: ${{ vars.DOCKERHUB_USERNAME }}
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      EXTRA_REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
 
   # An index, not a manifest: QEMU, the scan loop running once per platform,
   # and the SBOM warning.
@@ -171,8 +182,11 @@ jobs:
       context-path: tests/fixtures/cross
       platforms: "linux/amd64,linux/arm64"
       tags: type=raw,value=multiarch-${{ github.run_id }}
+      extra-registry: dhi.io
+      extra-registry-username: ${{ vars.DOCKERHUB_USERNAME }}
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      EXTRA_REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
 
   # `scan: false` only works with `push: false`, so this fixture is built and
   # never published.
@@ -194,8 +208,11 @@ jobs:
       context-path: tests/fixtures/vulnerable
       scan: false
       push: false
+      extra-registry: dhi.io
+      extra-registry-username: ${{ vars.DOCKERHUB_USERNAME }}
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      EXTRA_REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
 
   # The YAML ignore form. `push: false` with `scan` defaulted scans without
   # publishing, so the ignore file is read. See tests/README.md.
@@ -217,8 +234,11 @@ jobs:
       context-path: tests/fixtures/vulnerable
       trivyignores: tests/trivyignore/accepted.trivyignore.yaml
       push: false
+      extra-registry: dhi.io
+      extra-registry-username: ${{ vars.DOCKERHUB_USERNAME }}
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      EXTRA_REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
 
   # The fixture's lock file is vulnerable and its image is not, so a green run
   # proves the source scan ran and that `trivyignores` reached it.
@@ -240,8 +260,11 @@ jobs:
       context-path: tests/fixtures/source-deps
       trivyignores: tests/trivyignore/accepted.trivyignore
       push: false
+      extra-registry: dhi.io
+      extra-registry-username: ${{ vars.DOCKERHUB_USERNAME }}
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      EXTRA_REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
 
   # The plain form. The file that suppresses anything is listed second.
   trivyignore-plain:
@@ -262,8 +285,11 @@ jobs:
       context-path: tests/fixtures/vulnerable
       trivyignores: tests/trivyignore/decoy.trivyignore,tests/trivyignore/accepted.trivyignore
       push: false
+      extra-registry: dhi.io
+      extra-registry-username: ${{ vars.DOCKERHUB_USERNAME }}
     secrets:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      EXTRA_REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
 
   # What the `defaults` scenario left in the registry, checked from outside.
   # Also the only test of the workflow's outputs.

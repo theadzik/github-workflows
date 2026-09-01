@@ -4,7 +4,7 @@
 # empty, the test fails, and the build fails with it. Two args, because the
 # input is newline-separated and a single one would not catch a splitter that
 # only ever keeps the first line.
-FROM alpine:latest
+FROM dhi.io/alpine-base:3.24-dev
 
 ARG EXPECTED
 ARG SECOND_ARG

@@ -4,7 +4,7 @@
 # The RUN is the assertion. Without the QEMU step it fails with "exec format
 # error" on a cross build, so a green run proves emulation works. It also checks
 # that the layer it lands in really is the architecture buildx was asked for.
-FROM alpine:latest
+FROM dhi.io/alpine-base:3.24-dev
 
 ARG TARGETARCH
 
