@@ -1,4 +1,14 @@
 version: 2
+
+# Only dhi.io. Every base image in this repository is a test fixture, and since
+# they moved off Docker Hub nothing here resolves against it.
+registries:
+  dhi-io:
+    type: docker-registry
+    url: https://dhi.io
+    username: ${{ secrets.DOCKERHUB_USERNAME }}
+    password: ${{ secrets.DOCKERHUB_TOKEN }}
+
 updates:
   # The actions pinned inside the reusable workflows here are what every caller
   # repository ends up running, so they are updated in this repository and reach
@@ -34,5 +44,19 @@ updates:
       default-days: 7
     groups:
       pre-commit:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker"
+    directories:
+      - "/tests/fixtures/*"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    registries:
+      - dhi-io
+    groups:
+      fixtures:
         patterns:
           - "*"
