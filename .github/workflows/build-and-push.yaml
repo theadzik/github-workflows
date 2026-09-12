@@ -53,7 +53,12 @@ on:
         type: boolean
         default: true
       scan:
-        description: "Fail on fixable findings. Only applies when push is false; the gate is push || scan."
+        description: "Scan a non-publishing run. Only applies when push is false; the gate is push || scan."
+        required: false
+        type: boolean
+        default: true
+      fail-on-vulnerabilities:
+        description: "Fail on fixable findings. False reports them as a warning and publishes anyway, so an image can be rebuilt on a patched base before the finding itself is fixable. A secret and an end-of-life base image fail either way."
         required: false
         type: boolean
         default: true
@@ -120,6 +125,7 @@ jobs:
         id: severity
         env:
           EXTRA: ${{ inputs.extra-scan-severity }}
+          FAIL_ON_VULNERABILITIES: ${{ inputs.fail-on-vulnerabilities }}
         run: |-
           set -euo pipefail
           severities="HIGH,CRITICAL"
@@ -145,7 +151,11 @@ jobs:
           done
 
           echo "severity=${severities}" >> "$GITHUB_OUTPUT"
-          echo "Fixable findings at ${severities} fail this build."
+          if [[ "${FAIL_ON_VULNERABILITIES}" == "true" ]]; then
+            echo "Fixable findings at ${severities} fail this build."
+          else
+            echo "Fixable findings at ${severities} are reported only; fail-on-vulnerabilities is false. A secret or an end-of-life base image still fails."
+          fi
 
       # Every platform is scanned, but the SBOM describes only the first.
       - name: Warn on multi-platform SBOM coverage
@@ -224,8 +234,10 @@ jobs:
           fi
 
           cat > "${RUNNER_TEMP}/trivy.yaml" <<'EOF'
-          # An EOL distro scans clean and exits 0 without this.
-          exit-on-eol: 1
+          # An EOL distro scans clean and exits 0 without this. 2, not 1, so the
+          # scan steps can tell it from a finding: Trivy exits on EOL first, and
+          # `fail-on-vulnerabilities` must not make an EOL base optional.
+          exit-on-eol: 2
 
           # `table-mode` is not here: it is rejected unless the format is table,
           # and this file is also used to generate the CycloneDX SBOM.
@@ -268,8 +280,10 @@ jobs:
         env:
           SEVERITY: ${{ steps.severity.outputs.severity }}
           CONTEXT: ${{ inputs.context-path }}
+          FAIL_ON_VULNERABILITIES: ${{ inputs.fail-on-vulnerabilities }}
         run: |-
           set -euo pipefail
+          status=0
           trivy fs \
             --config "${RUNNER_TEMP}/trivy.yaml" \
             --severity "${SEVERITY}" \
@@ -277,7 +291,34 @@ jobs:
             --exit-code 1 \
             --format table \
             --table-mode detailed \
-            "${CONTEXT}"
+            "${CONTEXT}" || status=$?
+
+          # 0 passes, and 2 is exit-on-eol, which no input can wave through.
+          # Only 1, a finding, is what fail-on-vulnerabilities governs.
+          if [[ "${status}" -ne 1 ]]; then
+            exit "${status}"
+          fi
+          if [[ "${FAIL_ON_VULNERABILITIES}" == "true" ]]; then
+            echo "::error title=Scan::the build context has findings at ${SEVERITY}"
+            exit 1
+          fi
+
+          # A secret shares that exit code with a finding and is not a CVE a
+          # later rebuild can clear, so the secret scanner runs again alone.
+          leaked=0
+          trivy fs \
+            --config "${RUNNER_TEMP}/trivy.yaml" \
+            --scanners secret \
+            --severity "${SEVERITY}" \
+            --exit-code 1 \
+            --format table \
+            "${CONTEXT}" || leaked=$?
+          if [[ "${leaked}" -ne 0 ]]; then
+            echo "::error title=Scan::the build context holds a secret; fail-on-vulnerabilities does not cover secrets"
+            exit "${leaked}"
+          fi
+
+          echo "::warning title=Scan::the build context has findings at ${SEVERITY}, tolerated because fail-on-vulnerabilities is false"
 
       # Only attested on a publishing run, so only built on one.
       - name: Generate source SBOM
@@ -356,6 +397,7 @@ jobs:
         if: inputs.push || inputs.scan
         env:
           SEVERITY: ${{ steps.severity.outputs.severity }}
+          FAIL_ON_VULNERABILITIES: ${{ inputs.fail-on-vulnerabilities }}
         run: |-
           set -euo pipefail
           layout="${RUNNER_TEMP}/layout"
@@ -372,6 +414,37 @@ jobs:
               --table-mode detailed
           }
 
+          # What one scan result does to the build. Exit code 2 is exit-on-eol,
+          # and a secret shares exit code 1 with a finding. Neither is a CVE a
+          # later rebuild can clear, so fail-on-vulnerabilities governs neither.
+          gate() {
+            local status=$1 subject=$2
+            if [[ "${status}" -eq 0 ]]; then
+              echo "${subject}: clean"
+              return 0
+            fi
+            if [[ "${status}" -ne 1 ]]; then
+              echo "::error title=Scan::${subject}: trivy exited ${status}. 2 is an end-of-life base image, which fail-on-vulnerabilities does not cover."
+              return "${status}"
+            fi
+            if [[ "${FAIL_ON_VULNERABILITIES}" == "true" ]]; then
+              echo "::error title=Scan::${subject} has findings at ${SEVERITY}"
+              return 1
+            fi
+            if ! trivy image \
+              --config "${RUNNER_TEMP}/trivy.yaml" \
+              --input "${layout}" \
+              --scanners secret \
+              --severity "${SEVERITY}" \
+              --exit-code 1 \
+              --format table; then
+              echo "::error title=Scan::${subject} holds a secret; fail-on-vulnerabilities does not cover secrets"
+              return 1
+            fi
+            echo "::warning title=Scan::${subject} has findings at ${SEVERITY}, tolerated because fail-on-vulnerabilities is false"
+            return 0
+          }
+
           # No provenance leaves a manifest at the root; anything else an index.
           # `unknown/unknown` children are buildkit's attestation manifests.
           root_media=$(jq -r '.manifests[0].mediaType' "${index}")
@@ -385,7 +458,9 @@ jobs:
 
           if [[ "${count}" -le 1 ]]; then
             echo "Single-platform layout."
-            scan
+            status=0
+            scan || status=$?
+            gate "${status}" "the image" || exit $?
             exit 0
           fi
 
@@ -403,20 +478,17 @@ jobs:
               > "${index}"
 
             echo "::group::Scanning ${platform}"
-            if scan; then
-              echo "${platform}: clean"
-            else
-              echo "::error title=Scan::${platform} has findings at ${SEVERITY}"
-              failed+=("${platform}")
-            fi
+            status=0
+            scan || status=$?
+            gate "${status}" "${platform}" || failed+=("${platform}")
             echo "::endgroup::"
           done
 
           if [[ ${#failed[@]} -gt 0 ]]; then
-            echo "::error title=Scan::findings on ${#failed[@]} of ${count} platforms: ${failed[*]}"
+            echo "::error title=Scan::${#failed[@]} of ${count} platforms failed the scan: ${failed[*]}"
             exit 1
           fi
-          echo "All ${count} platforms scanned clean at ${SEVERITY}."
+          echo "All ${count} platforms scanned at ${SEVERITY}."
 
       # Pinned: 2.x and 3.x write the signature in different places.
       - name: Install Cosign

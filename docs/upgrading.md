@@ -39,6 +39,11 @@ Two ways forward, and they are the usual two:
 - Upgrade the dependency.
 - Record the acceptance in the file named by `trivyignores`.
 
+A third exists for a repository that would otherwise stop rebuilding:
+`fail-on-vulnerabilities: false` reports the finding and publishes anyway. It
+does not cover the secret half of this section — a private key in the context
+fails the build whatever that input says.
+
 Use the id the scan prints. For npm advisories that is often a GHSA rather than
 a CVE:
 

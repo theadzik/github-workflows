@@ -65,11 +65,12 @@ from clean.
 | `arm64` | One platform that is not the default, built and scanned under emulation. |
 | `multi-platform` | The SBOM coverage warning, an index push, QEMU, and the per-platform scan loop running more than once. |
 | `scan-disabled` | `scan: false` against the vulnerable fixture. Built, never pushed, because `scan: false` applies only when `push` is `false`. |
+| `tolerated-findings` | `fail-on-vulnerabilities: false` against the vulnerable fixture, with no ignore file. Both scans report the CVE and the run publishes anyway. |
 | `trivyignore-yaml` / `trivyignore-plain` | Both accepted forms of `trivyignores`. |
 | `source-deps` | The source scan reading a lock file, and `trivyignores` applying to it. The image holds no vulnerable package, so a green run proves the source scan ran and was filtered. |
 | `published` | The `digest` and `image-ref` outputs, the signature, the referrers and the tag. Checked from outside, against what `defaults` left in the registry. |
 
-Two scenarios are shaped by details worth stating.
+Three scenarios are shaped by details worth stating.
 
 **`build-only` passes `extra-scan-severity: "medium, low"`.** The value is
 lowercase, spaced and two items long on purpose. Together those test the letter
@@ -83,6 +84,16 @@ fixable finding at any severity today, so this cannot make the scenario red.
 scan to CRITICAL, so that the fixture's one CRITICAL was all Trivy considered.
 HIGH is a floor now, so narrowing is no longer possible. See below.
 
+**`tolerated-findings` publishes the vulnerable fixture.** It is the only
+scenario that does, and `push` is left at its default on purpose: the claim
+`fail-on-vulnerabilities: false` makes is not "the scan passes" but "the image
+still ships", and only a publishing run tests the second one. The tag carries the
+run id, so `cleanup` deletes it like any other. It shares the weakness of the
+`trivyignore-*` scenarios in that a fixture which stopped being vulnerable would
+keep it green — see [below](#keeping-the-vulnerable-fixture-honest) — and it
+cannot show that a secret or an end-of-life base still fails on that path,
+because nothing that fails is testable here.
+
 ## What is not covered
 
 **Anything that is supposed to fail.** A job that calls a reusable workflow may
@@ -93,6 +104,8 @@ Every guard in `build-and-push.yaml` is untested for this reason:
 
 - the scan failing the build on a fixable HIGH or CRITICAL, in the image or in
   the source,
+- the two findings `fail-on-vulnerabilities: false` does not cover: a secret,
+  and an end-of-life base image,
 - `Resolve scan severities` rejecting `HIGH`, or a value that is not a severity,
 - the SBOM step refusing a document with no operating-system component,
 - the push step catching a registry that stored a different digest,
