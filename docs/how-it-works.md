@@ -53,6 +53,35 @@ The step condition is `push || scan`. Read it as one rule:
 purpose. A caller must not be able to turn the gate off and push at the same
 time.
 
+### Why a finding can be allowed not to fail the job
+
+`fail-on-vulnerabilities: false` keeps the scan and drops the failure. The
+findings are still listed, and the step ends on a `::warning` naming them.
+
+This reads like a hole in the rule above, and it is not the one it looks like.
+The gate it removes was working against the fix it exists to force. A new
+advisory lands against an image whose source has not changed. The rebuild that
+would pick up the patched base is exactly what the gate then blocks, and the way
+back in is a `trivyignores` entry for a CVE nobody intends to accept — written
+to get a rebuild, and left behind afterwards. An image that is hard to republish
+is an image that is republished less often, and the scan is not the thing
+keeping it safe at that point.
+
+So the default stays `true`, and a caller that rebuilds on a schedule can set it
+to `false` and read the warnings instead.
+
+Two findings are not the caller's to wave through, and the input does not cover
+them:
+
+- **A secret.** `--exit-code 1` covers a vulnerability and a leaked private key
+  alike, so on the tolerated path the secret scanner runs a second time on its
+  own. That one still fails the job.
+- **An end-of-life base image.** `exit-on-eol` is a separate exit code for
+  exactly this reason — see below.
+
+Neither is a CVE that a later rebuild clears on its own, which is the whole
+argument for tolerating findings in the first place.
+
 ### The severity floor
 
 HIGH and CRITICAL always fail the build. This is a floor, not a default.
@@ -166,8 +195,15 @@ A distribution that has stopped issuing security updates is a special case. An
 empty report then means Trivy has nothing to *report*. It does not mean there is
 nothing to find. An EOL Alpine scans clean and exits 0.
 
-`exit-on-eol: 1` turns that into a failure. The base image must be one that can
+`exit-on-eol: 2` turns that into a failure. The base image must be one that can
 still be patched.
+
+The code is 2 rather than 1 so that the scan steps can tell the two apart.
+Trivy checks EOL before it checks findings and exits with this code, so a base
+that is both EOL and vulnerable still exits 2 — measured against Trivy v0.74.0,
+`alpine:3.10` and a fixable CRITICAL. `fail-on-vulnerabilities: false` therefore
+tolerates exit code 1 and nothing else. Bumping a dead base is the fix, and no
+input postpones it.
 
 ## Secrets are a gate, not a report
 
@@ -175,7 +211,8 @@ The scan configuration lists both `vuln` and `secret` scanners. Both are Trivy
 defaults today. They are written down so that a future Trivy release cannot drop
 either one without anyone noticing.
 
-A private key in a layer fails the build. `ignore-unfixed` does not hide it.
+A private key in a layer fails the build. `ignore-unfixed` does not hide it, and
+neither does `fail-on-vulnerabilities: false`.
 
 ## The SBOM
 

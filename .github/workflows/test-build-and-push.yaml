@@ -214,6 +214,32 @@ jobs:
       REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
       EXTRA_REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
 
+  # The vulnerable fixture with no ignore file, published. Green only if both
+  # scans found the CVE, reported it and let the run continue.
+  tolerated-findings:
+    name: fail-on-vulnerabilities false
+    needs: shared
+    if: needs.shared.outputs.can-run == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+      packages: write
+    uses: ./.github/workflows/build-and-push.yaml
+    with:
+      registry: ghcr.io
+      image-name: ${{ needs.shared.outputs.image }}
+      registry-username: ${{ github.actor }}
+      context-path: tests/fixtures/vulnerable
+      fail-on-vulnerabilities: false
+      tags: type=raw,value=tolerated-${{ github.run_id }}
+      extra-registry: dhi.io
+      extra-registry-username: ${{ vars.DOCKERHUB_USERNAME }}
+    secrets:
+      REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      EXTRA_REGISTRY_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
+
   # The YAML ignore form. `push: false` with `scan` defaulted scans without
   # publishing, so the ignore file is read. See tests/README.md.
   trivyignore-yaml:
@@ -381,7 +407,7 @@ jobs:
   # because a build that died after pushing still left tags behind.
   cleanup:
     name: Delete this run's images
-    needs: [shared, defaults, every-optional-input, arm64, multi-platform, published]
+    needs: [shared, defaults, every-optional-input, arm64, multi-platform, tolerated-findings, published]
     if: always() && needs.shared.outputs.can-run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -496,6 +522,7 @@ jobs:
       - arm64
       - multi-platform
       - scan-disabled
+      - tolerated-findings
       - trivyignore-yaml
       - trivyignore-plain
       - source-deps
