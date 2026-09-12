@@ -19,8 +19,10 @@ build → OCI layout on disk → Trivy scan
 Four rules hold, whatever the caller passes:
 
 1. **Nothing unscanned reaches the registry.** The scan runs while the image is
-   still on disk. A finding fails the job before anything is pushed. Every
-   platform of a multi-platform index is scanned on its own.
+   still on disk, before anything is pushed. Every platform of a multi-platform
+   index is scanned on its own. A finding fails the job unless the caller passes
+   `fail-on-vulnerabilities: false`, which reports it instead — a secret and an
+   end-of-life base image fail either way.
 2. **The caller cannot reconfigure the scan.** Trivy looks for three
    configuration files in the working directory, which is the caller's own
    repository. All three are pinned to files this workflow writes.
@@ -99,7 +101,8 @@ not a provider.
 | `build-args` | *(none)* | Build args, one `KEY=value` per line. |
 | `platforms` | `linux/amd64` | Comma-separated. Every platform is scanned separately. Anything other than `linux/amd64` sets up QEMU, so a cross build can `RUN`. The attested SBOM still describes the first platform only, and the job warns when that applies. |
 | `push` | `true` | `false` builds and scans only, for pull requests. |
-| `scan` | `true` | Fail on fixable findings. Applies only when `push` is `false`. The gate is `push \|\| scan`, so nothing is ever pushed unscanned. |
+| `scan` | `true` | Scan a non-publishing run. Applies only when `push` is `false`. The gate is `push \|\| scan`, so nothing is ever pushed unscanned. |
+| `fail-on-vulnerabilities` | `true` | Fail on fixable findings. `false` lists them, ends the step on a warning, and publishes anyway — for a repository rebuilt on a schedule, where a fresh advisory would otherwise block the rebuild that picks up the patched base. A secret in the context or a layer, and an end-of-life base image, still fail. |
 | `extra-scan-severity` | *(none)* | Severities to fail on as well as HIGH and CRITICAL: `UNKNOWN`, `LOW`, `MEDIUM`, comma-separated. Naming HIGH or CRITICAL fails the run. |
 | `trivyignores` | *(none)* | Path to a Trivy ignore file, relative to the caller's repository. One `.trivyignore.yaml`, or a comma-separated list of plain `.trivyignore` files. Prefer the YAML form: it carries `expired_at` and `statement`. |
 | `extra-registry` | *(none)* | Further registry to log in to, for base image pulls. Nothing is published there. |
