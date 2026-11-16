@@ -27,14 +27,14 @@ repos:
   # and signs what it builds, so that second question is the one that matters
   # here. Offline by default; the audits needing a GitHub token are skipped.
   - repo: https://github.com/zizmorcore/zizmor-pre-commit
-    rev: v1.30.0
+    rev: v1.31.1
     hooks:
       - id: zizmor
 
   # Checks GitHub will otherwise only report by rejecting a push or silently
   # ignoring a mistyped key.
   - repo: https://github.com/python-jsonschema/check-jsonschema
-    rev: 0.38.0
+    rev: 0.39.0
     hooks:
       - id: check-github-workflows
       - id: check-dependabot
@@ -45,7 +45,7 @@ repos:
       - id: yamllint
 
   - repo: https://github.com/igorshubovych/markdownlint-cli
-    rev: v0.49.1
+    rev: v0.50.0
     hooks:
       - id: markdownlint
         args: ["--fix"]
